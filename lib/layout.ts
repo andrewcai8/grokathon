@@ -66,7 +66,12 @@ export function estimateCardHeight(node: BranchNode): number {
   const bodyLines = node.body ? Math.max(1, Math.ceil(node.body.length / 46)) : 0;
   const titleH = titleLines * 25;
   const bodyH = bodyLines * 21;
-  const chipsH = node.source_post_ids.length > 0 ? 30 : 0;
+  // Citations wrap, roughly two per row at CARD_W — reserve every row, or the
+  // first paint of a heavily-sourced card jumps when the real height lands.
+  // Upper bound only: the card dedupes to one chip per account and caps at 6,
+  // so this over-reserves for repeat posters and the measurement corrects it.
+  const chipRows = Math.ceil(Math.min(6, node.source_post_ids.length) / 2);
+  const chipsH = chipRows ? chipRows * 24 + (chipRows - 1) * 6 + 8 : 0;
   const badgeH = node.epistemic ? 22 : 0;
   return 20 + titleH + (bodyH ? bodyH + 10 : 0) + chipsH + badgeH + 20;
 }

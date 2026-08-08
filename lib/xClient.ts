@@ -171,6 +171,25 @@ export async function getPostsByIds(
   return new Map(normalize(json).map((p) => [p.id, p]));
 }
 
+/**
+ * Trends personalised to the authed account — the "what's trending for you"
+ * rail on x.com, rather than a global top-10.
+ *
+ * NOT verified as available on our access level. Documented as requiring an X
+ * Premium subscription on the authed user, so this may 403 for a given account.
+ * The caller must treat failure as normal and fall back, never assume it works.
+ */
+export async function getPersonalizedTrends(
+  token: string,
+): Promise<{ name: string; postCount?: number }[]> {
+  const json = await xGet<{
+    data?: { trend_name?: string; post_count?: number }[];
+  }>("/users/personalized_trends", token, {});
+  return (json.data ?? [])
+    .map((t) => ({ name: t.trend_name ?? "", postCount: t.post_count }))
+    .filter((t) => t.name);
+}
+
 /** Fallback seed and topic reseed. Not an Owned Read — costs more per post. */
 export async function searchRecent(
   token: string,

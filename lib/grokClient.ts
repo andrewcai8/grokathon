@@ -34,6 +34,14 @@ export const REASONING_EFFORT = process.env.GROK_REASONING_EFFORT ?? "low";
  */
 export const MAX_CHILDREN = Number(process.env.GROK_MAX_CHILDREN ?? 3);
 
+/**
+ * Root topics per board. Three, for the same reason children are three: the
+ * whole board then has one branching factor, and the zoomed-out orientation
+ * view stays a glanceable map instead of a scroll. Both Branches captures we
+ * worked from show exactly three roots.
+ */
+export const MAX_ROOTS = Number(process.env.GROK_MAX_ROOTS ?? 3);
+
 let client: OpenAI | null = null;
 export function grok(): OpenAI {
   if (!process.env.XAI_API_KEY) {
@@ -187,8 +195,8 @@ export async function clusterSeed(posts: XPost[]) {
     properties: {
       topics: {
         type: "array",
-        minItems: 3,
-        maxItems: 8,
+        minItems: 1,
+        maxItems: MAX_ROOTS,
         items: {
           type: "object",
           properties: {
@@ -215,16 +223,20 @@ export async function clusterSeed(posts: XPost[]) {
     additionalProperties: false,
   };
 
-  const content = `Here are ${posts.length} posts from my X timeline today. Cluster them into 5-8 topics that describe what my day actually contains.
+  const content = `Here are ${posts.length} posts from my X timeline today. Give me THE ${MAX_ROOTS} stories that actually define my day.
 
-Cover the major clusters. Rank by how much they matter to me, using engagement and how much of the timeline they occupy. Put genuine noise in a single low-priority "Other" topic rather than dignifying it.
+This is a hard cap, not a target — pick the ${MAX_ROOTS} that matter most and let the rest go. Rank by how much they matter to me, using engagement and how much of the timeline they occupy. Do not add an "Other" bucket; with only ${MAX_ROOTS} slots, spending one on noise wastes it.
 
 POSTS:
 ${posts.map(postLine).join("\n\n")}`;
 
-  return structured("day_topics", schema, content, (raw) =>
+  const out = await structured("day_topics", schema, content, (raw) =>
     GrokClusterSchema.parse(raw),
   );
+  // schema caps it, but parsing stays tolerant — trim rather than throw
+  return {
+    topics: [...out.topics].sort((a, b) => b.priority - a.priority).slice(0, MAX_ROOTS),
+  };
 }
 
 const FORK_INTENT: Record<Fork, string> = {

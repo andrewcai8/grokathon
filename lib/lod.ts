@@ -17,25 +17,28 @@ export const MIN_ZOOM = 0.28;
 export const MAX_ZOOM = 1.75;
 export const DEFAULT_ZOOM = 0.62;
 
-/** below this, body text is pure texture; above it, prose */
-const BODY_FADE_START = 0.5;
-const BODY_FADE_END = 1.0;
-
 /**
- * Attribution — who said it, and how well established it is.
+ * ALL of these ramps complete at or below DEFAULT_ZOOM. That is the rule.
  *
- * This is NOT "detail". A claim without its source is a claim we shouldn't be
- * making, so the citation has to be on screen wherever the title is readable.
- * It used to share the late detail ramp, which meant the default view showed
- * confident-looking assertions with no visible grounding — exactly the failure
- * mode the product exists to fix. It now lands well before the resting zoom.
+ * Nothing is gated behind zooming IN. The resting view is the complete view —
+ * body, citations, chrome, all resolved. The ramps only engage when you pull
+ * BACK for the overview, and they peel in order of how disposable the layer
+ * is: chrome first, then attribution, then body collapses to texture last.
+ *
+ * The earlier tuning had it backwards. Reading required zooming in, which made
+ * the resting board look like a set of unsourced assertions and turned the
+ * zoom into a paywall on the product's own honesty layer.
  */
-const ATTRIB_FADE_START = 0.34;
-const ATTRIB_FADE_END = 0.48;
+const BODY_FADE_START = 0.3;
+const BODY_FADE_END = 0.6;
 
-/** Board chrome — node coordinates, fork provenance. Genuinely last. */
-const DETAIL_FADE_START = 0.72;
-const DETAIL_FADE_END = 1.05;
+/** Citations + epistemic status. Peels second — after chrome, before body. */
+const ATTRIB_FADE_START = 0.36;
+const ATTRIB_FADE_END = 0.5;
+
+/** Node coordinates, fork provenance. The most disposable layer, so it goes first. */
+const DETAIL_FADE_START = 0.44;
+const DETAIL_FADE_END = 0.58;
 
 export function clamp(v: number, lo: number, hi: number) {
   return Math.min(hi, Math.max(lo, v));

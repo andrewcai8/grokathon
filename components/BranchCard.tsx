@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useRef } from "react";
 import type { PositionedCard } from "@/lib/layout";
-import type { Board, Fork } from "@/lib/schema";
+import type { Board, Fork, XPost } from "@/lib/schema";
 import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight } from "@/lib/store";
 import { PostChip } from "./PostChip";
 
@@ -18,6 +18,35 @@ const EPISTEMIC_TONE: Record<string, string> = {
   thin_evidence: "var(--gb-faint)",
   projection: "var(--gb-proj)",
 };
+
+/**
+ * One chip per ACCOUNT, not per post.
+ *
+ * "widely_shared" is a claim about corroboration ACROSS accounts, so ten posts
+ * from one handle must never render like ten sources — that's the exact
+ * inflation the epistemic layer exists to prevent. Ordered by reach so the cap
+ * drops the long tail rather than whoever happened to be cited first.
+ */
+function distinctAccounts(posts: XPost[]) {
+  const byAccount = new Map<string, { post: XPost; count: number }>();
+  for (const p of posts) {
+    const key = p.author.handle.toLowerCase();
+    const hit = byAccount.get(key);
+    if (hit) {
+      hit.count += 1;
+      // keep the account's best-performing post as the chip's link target
+      if ((p.metrics?.likes ?? 0) > (hit.post.metrics?.likes ?? 0)) hit.post = p;
+    } else {
+      byAccount.set(key, { post: p, count: 1 });
+    }
+  }
+  return [...byAccount.values()].sort(
+    (a, b) => (b.post.metrics?.likes ?? 0) - (a.post.metrics?.likes ?? 0),
+  );
+}
+
+/** Enough to read corroboration at a glance; past this it's just wallpaper. */
+const SOURCE_CAP = 6;
 
 interface Props {
   card: PositionedCard;
@@ -49,6 +78,8 @@ function BranchCardInner({
 }: Props) {
   const n = card.node;
   const posts = n.source_post_ids.map((id) => board.posts[id]).filter(Boolean);
+  const sources = distinctAccounts(posts);
+  const shown = sources.slice(0, SOURCE_CAP);
   const innerRef = useRef<HTMLDivElement>(null);
 
   // measure the content, not the card — the card's own height comes FROM this
@@ -131,28 +162,46 @@ function BranchCardInner({
           </p>
         ) : null}
 
-        <div className="gb-attribution mt-3.5 flex flex-nowrap items-center gap-2 overflow-hidden">
+        {/* Status gets its own line so the citations get the card's full width.
+            They used to share one clipped row, which meant a claim corroborated
+            by six accounts displayed exactly like a claim from one — the single
+            most important thing the epistemic layer has to distinguish. */}
+        <div className="gb-attribution mt-3.5">
           {n.epistemic ? (
-            <span
-              className="gb-label shrink-0"
+            <div
+              className="gb-label"
               style={{
                 color: EPISTEMIC_TONE[n.epistemic] ?? "var(--gb-faint)",
                 fontSize: "10.5px",
               }}
             >
               {EPISTEMIC_LABEL[n.epistemic]}
-            </span>
+              {sources.length ? (
+                <span style={{ color: "var(--gb-faint)" }}>
+                  {"  ·  "}
+                  {/* account count only — the ×N badges already carry how many
+                      posts each one contributed, and spelling both out here
+                      wrapped the status line onto two rows */}
+                  {sources.length} {sources.length === 1 ? "account" : "accounts"}
+                </span>
+              ) : null}
+            </div>
           ) : null}
-          {posts.slice(0, 2).map((p) => (
-            <PostChip key={p.id} post={p} />
-          ))}
-          {posts.length > 2 ? (
-            <span
-              className="gb-label shrink-0 tabular-nums"
-              style={{ color: "var(--gb-faint)" }}
-            >
-              +{posts.length - 2}
-            </span>
+
+          {shown.length ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {shown.map((s) => (
+                <PostChip key={s.post.id} post={s.post} count={s.count} />
+              ))}
+              {sources.length > shown.length ? (
+                <span
+                  className="gb-label tabular-nums"
+                  style={{ color: "var(--gb-faint)", fontSize: "10.5px" }}
+                >
+                  +{sources.length - shown.length}
+                </span>
+              ) : null}
+            </div>
           ) : null}
         </div>
 

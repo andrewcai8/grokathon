@@ -178,6 +178,6 @@ export const GrokTopicSchema = z.object({
 });
 
 export const GrokClusterSchema = z.object({
-  topics: z.array(GrokTopicSchema).min(3).max(12),
+  topics: z.array(GrokTopicSchema).min(1).max(12),
 });
 export type GrokCluster = z.infer<typeof GrokClusterSchema>;

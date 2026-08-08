@@ -24,7 +24,7 @@ function compact(n: number) {
  * competes with the card itself for attention, and the citation should be
  * available without being loud.
  */
-export function PostChip({ post }: { post: XPost }) {
+export function PostChip({ post, count = 1 }: { post: XPost; count?: number }) {
   return (
     <a
       href={post.url ?? `https://x.com/i/status/${post.id}`}
@@ -36,7 +36,7 @@ export function PostChip({ post }: { post: XPost }) {
           ? `UNVERIFIED — Grok reported this post but we could not confirm it exists on X.\n\n@${post.author.handle}: ${post.text}`
           : `${post.author.name} (@${post.author.handle})\n\n${post.text}`
       }
-      className="group flex shrink-0 items-center gap-1.5 border px-1.5 py-[3px] transition-colors"
+      className="group flex shrink-0 items-center gap-1 border px-[5px] py-[3px] transition-colors"
       style={{
         // dashed = we could not confirm this post exists. never let an
         // unconfirmed citation look identical to a verified one.
@@ -56,12 +56,12 @@ export function PostChip({ post }: { post: XPost }) {
         <img
           src={post.author.avatar_url}
           alt=""
-          className="h-[16px] w-[16px] shrink-0 object-cover"
+          className="h-[15px] w-[15px] shrink-0 object-cover"
           style={{ borderRadius: 1 }}
         />
       ) : (
         <span
-          className="flex h-[16px] w-[16px] shrink-0 items-center justify-center text-[8px] font-semibold leading-none"
+          className="flex h-[15px] w-[15px] shrink-0 items-center justify-center text-[8px] font-semibold leading-none"
           style={{
             background: "rgba(255,255,255,0.1)",
             color: "var(--gb-dim)",
@@ -90,7 +90,15 @@ export function PostChip({ post }: { post: XPost }) {
       >
         @{post.author.handle}
       </span>
-      {post.metrics ? (
+      {/* this account cited more than once on the same node */}
+      {count > 1 ? (
+        <span
+          className="gb-label whitespace-nowrap tabular-nums"
+          style={{ color: "var(--gb-dim)", fontSize: "10.5px" }}
+        >
+          ×{count}
+        </span>
+      ) : post.metrics ? (
         <span
           className="gb-label whitespace-nowrap tabular-nums"
           style={{ color: "var(--gb-faint)", fontSize: "10.5px" }}

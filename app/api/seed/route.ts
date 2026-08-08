@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { buildBoard } from "@/lib/boardBuilder";
-import { clusterSeed, hasGrok } from "@/lib/grokClient";
+import { clusterSeed, hasGrok, MAX_ROOTS } from "@/lib/grokClient";
 import { setBoard } from "@/lib/serverBoard";
 import { loadSnapshot, saveSnapshot } from "@/lib/snapshot";
 import { activeToken } from "@/lib/xAuth";
-import { getHomeTimeline, searchRecent } from "@/lib/xClient";
+import {
+  getHomeTimeline,
+  getPersonalizedTrends,
+  searchRecent,
+} from "@/lib/xClient";
 import { FIXTURE_BOARD } from "@/lib/fixtures";
 import type { XPost } from "@/lib/schema";
 
@@ -23,6 +27,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const wantSnapshot = url.searchParams.get("snapshot");
   const live = url.searchParams.get("live") === "1";
+  const trending = url.searchParams.get("trending") === "1";
   const query = url.searchParams.get("q");
 
   if (wantSnapshot) {
@@ -35,7 +40,7 @@ export async function GET(req: Request) {
 
   // default to the rehearsed snapshot unless explicitly asked for a live read —
   // a demo should never gamble on the venue wifi
-  if (!live && !query) {
+  if (!live && !query && !trending) {
     const snap = await loadSnapshot("latest");
     if (snap) {
       setBoard(snap);
@@ -46,18 +51,47 @@ export async function GET(req: Request) {
   const today = new Date().toISOString().slice(0, 10);
   let posts: XPost[] = [];
   let label = "Your day on X";
-  let mode: "my_day" | "search" = "my_day";
+  let mode: "my_day" | "search" | "trending" = "my_day";
   let source = "fixtures";
 
   const token = await activeToken();
   if (token?.user_id) {
     try {
-      if (query) {
+      if (trending) {
+        /**
+         * Trending, but personalised to this account — the x.com "for you"
+         * trends rail, not a global top-10. Trends give us topic NAMES, so we
+         * search recent posts for the top few and cluster those.
+         *
+         * Availability is unverified (documented as Premium-gated), so a
+         * failure here is expected and falls through to the timeline seed
+         * below rather than breaking the board.
+         */
+        const trends = await getPersonalizedTrends(token.access_token);
+        const top = trends.slice(0, MAX_ROOTS);
+        if (top.length) {
+          const batches = await Promise.all(
+            top.map((t) =>
+              searchRecent(token.access_token, `${t.name} -is:retweet lang:en`, 25).catch(
+                () => [],
+              ),
+            ),
+          );
+          const seen = new Set<string>();
+          posts = batches.flat().filter((p) => !seen.has(p.id) && seen.add(p.id));
+          label = "Trending for you";
+          mode = "trending";
+          source = "x_personalized_trends";
+        }
+      }
+
+      if (!posts.length && query) {
         posts = await searchRecent(token.access_token, query, 60);
         label = query;
         mode = "search";
         source = "x_search_recent";
-      } else {
+      } else if (!posts.length) {
+        // trending unavailable or empty — the timeline seed always works
         posts = await getHomeTimeline(token.access_token, token.user_id, 100);
         label = token.handle ? `@${token.handle}'s day` : "Your day on X";
         source = "x_home_timeline";

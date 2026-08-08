@@ -120,6 +120,18 @@ export function SeedBar({
             {busy === "live" ? "Reading timeline…" : "↻ Reseed from timeline"}
           </button>
         ) : null}
+        {me?.connected ? (
+          <button
+            onClick={() => reseed("/api/seed?trending=1", "trend")}
+            disabled={Boolean(busy)}
+            className={action}
+            style={actionStyle}
+            onMouseEnter={hoverOn}
+            onMouseLeave={hoverOff}
+          >
+            {busy === "trend" ? "Reading trends…" : "◆ Seed from my trending"}
+          </button>
+        ) : null}
         <button
           onClick={() => reseed("/api/seed?snapshot=latest", "snap")}
           disabled={Boolean(busy)}

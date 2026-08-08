@@ -54,6 +54,8 @@ interface Props {
   pending: boolean;
   error?: string;
   selected: boolean;
+  /** an ancestor of (or is) the hovered/selected node */
+  onPath: boolean;
   onToggle: (id: string) => void;
   onHover: (id: string | null) => void;
   onFork: (id: string, fork: Fork) => void;
@@ -72,6 +74,7 @@ function BranchCardInner({
   pending,
   error,
   selected,
+  onPath,
   onToggle,
   onHover,
   onFork,
@@ -98,6 +101,7 @@ function BranchCardInner({
       className="gb-card absolute left-0 top-0 cursor-pointer select-none px-4 py-4"
       data-expanded={card.expanded ? "true" : "false"}
       data-selected={selected ? "true" : "false"}
+      data-onpath={onPath ? "true" : "false"}
       style={{
         transform: `translate3d(${card.x}px, ${card.y}px, 0)`,
         width: card.w,

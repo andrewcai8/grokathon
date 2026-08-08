@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useBoard } from "@/lib/store";
 import { lodFor, clamp, frameRect } from "@/lib/lod";
 import { CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
@@ -359,6 +359,26 @@ export function ZoomSurface() {
   // every card previews, because every card can be expanded
   const showGhost = Boolean(hoveredCard);
 
+  /**
+   * The lineage of whatever you're pointing at, root to leaf.
+   *
+   * At depth 3 a card gives you no clue how you got there — the columns to its
+   * left hold several candidate parents and the layout alone won't say which.
+   * Lighting the chain answers that without asking the user to trace bands.
+   * Hover wins over selection so you can probe other branches without losing
+   * your place.
+   */
+  const focusId = hoveredId ?? selectedId;
+  const ancestry = useMemo(() => {
+    const chain = new Set<string>();
+    let cur = focusId ? board?.nodes[focusId] : undefined;
+    while (cur) {
+      chain.add(cur.id);
+      cur = cur.parent_id ? board?.nodes[cur.parent_id] : undefined;
+    }
+    return chain;
+  }, [focusId, board]);
+
   // NOTE: the container must mount on the very first render, even with no
   // board. It carries the ref that the wheel/drag/resize effects bind to, and
   // those effects only run once — early-returning a different element here
@@ -373,6 +393,20 @@ export function ZoomSurface() {
         className="gb-stage absolute left-0 top-0 origin-top-left will-change-transform"
         style={{ width: layout?.width ?? 0, height: layout?.height ?? 0 }}
       >
+        {/* tracks first: they are the ground the cards sit on */}
+        {layout?.tracks.map((t) => (
+          <div
+            key={t.key}
+            className="gb-track"
+            data-onpath={ancestry.has(t.nodeId) ? "true" : "false"}
+            style={{
+              transform: `translate3d(${t.x}px, ${t.y}px, 0)`,
+              width: t.w,
+              height: t.h,
+            }}
+          />
+        ))}
+
         {showGhost && hoveredCard ? <GhostColumn card={hoveredCard} /> : null}
 
         {layout?.skeletons.map((box, i) => (
@@ -387,6 +421,7 @@ export function ZoomSurface() {
             pending={pending.has(card.node.id)}
             error={errors[card.node.id]}
             selected={selectedId === card.node.id}
+            onPath={ancestry.has(card.node.id)}
             onToggle={onToggle}
             onHover={setHovered}
             onFork={onFork}

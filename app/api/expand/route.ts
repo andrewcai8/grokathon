@@ -226,18 +226,22 @@ export async function POST(req: Request) {
 
     // only patch the server graph when it actually owns this node
     if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
+      const prev = b.nodes[nodeId];
+      // the board can be reseeded while a 10s expand is in flight — if this
+      // node's board is gone, drop the patch rather than crashing the request
+      if (!prev) return b;
       const nodes = { ...b.nodes };
       for (const c of children) nodes[c.id] = c;
       nodes[nodeId] = rollUpCitations(
         {
-          ...nodes[nodeId],
+          ...prev,
           children_ids:
             fork === "deeper"
               ? children.map((c) => c.id)
-              : [...nodes[nodeId].children_ids, ...children.map((c) => c.id)],
+              : [...prev.children_ids, ...children.map((c) => c.id)],
           // a bare trending headline gets its story once we've actually
           // searched — grounded now, so writing it is no longer an invention
-          body: nodes[nodeId].body || summary,
+          body: prev.body || summary,
           has_children: true,
           updated_at: new Date().toISOString(),
         },

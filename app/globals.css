@@ -136,6 +136,36 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   Tracks — the parent link.
+
+   A slab enclosing an open node and its entire subtree. Nesting reads through
+   accumulated brightness: each level sits a little above the one containing
+   it, so depth is legible without a single arrow or connector line.
+   -------------------------------------------------------------------------- */
+
+.gb-track {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.022);
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  transition:
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 200ms ease,
+    border-color 200ms ease;
+  animation: gb-card-in 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* the lineage of whatever you're pointing at, lit from root to leaf */
+.gb-track[data-onpath="true"] {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* --------------------------------------------------------------------------
    Cards.
    Hairline-bordered panels on black, near-square corners. The light theme's
    soft shadows carried the hierarchy before; on black, structure has to come
@@ -158,14 +188,17 @@ body {
   border-color: var(--gb-line-hi);
 }
 
-/* An open parent is stretched over its whole subtree. It reads as a BRACKET
-   containing the column to its right: bright left spine, dimmed fill. This
-   replaces the light theme's big sweeping corner radius, which fought the
-   square geometry. */
+/* An open node sits INSIDE its own track now, so it needs no bracket of its
+   own — the earlier bright left spine actually pointed away from the children
+   it was meant to gesture at. It just lifts slightly off the slab. */
 .gb-card[data-expanded="true"] {
-  background: var(--gb-panel);
-  border-left-color: var(--gb-line-max);
-  box-shadow: inset 1px 0 0 var(--gb-line-max);
+  background: var(--gb-surface-hi);
+}
+
+/* every ancestor of the hovered/selected node, so lineage is traceable at a
+   glance from any depth */
+.gb-card[data-onpath="true"] {
+  border-color: var(--gb-line-hi);
 }
 
 .gb-card[data-selected="true"] {

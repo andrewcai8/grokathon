@@ -337,14 +337,43 @@ ${posts.map(postLine).join("\n\n")}`;
 const X_POST_URL = /^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 
 /** Pull the last top-level JSON object out of a possibly chatty response. */
-function extractJson<T>(text: string): T {
+function extractJson<T>(text: string, isValid?: (o: unknown) => boolean): T {
+  const ok = (o: unknown) => (isValid ? isValid(o) : true);
   try {
-    return JSON.parse(text) as T;
+    const direct = JSON.parse(text);
+    if (ok(direct)) return direct as T;
   } catch {
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start === -1 || end <= start) throw new Error("no JSON in response");
-    return JSON.parse(text.slice(start, end + 1)) as T;
+    /* fall through to scanning */
+  }
+  {
+    // Scan for a balanced object. first-brace-to-last-brace breaks when the
+    // response contains more than one object, which tool-enabled replies do.
+    for (let i = text.indexOf("{"); i !== -1; i = text.indexOf("{", i + 1)) {
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let j = i; j < text.length; j++) {
+        const ch = text[j];
+        if (esc) { esc = false; continue; }
+        if (ch === "\\") { esc = true; continue; }
+        if (ch === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (ch === "{") depth++;
+        else if (ch === "}" && --depth === 0) {
+          try {
+            const candidate = JSON.parse(text.slice(i, j + 1));
+            // A tool-enabled reply can emit a status object BEFORE the real
+            // answer, so take the first object that actually carries the
+            // payload rather than the first one that parses.
+            if (ok(candidate)) return candidate as T;
+          } catch {
+            /* not this one */
+          }
+          break; // this opening brace is closed; try the next
+        }
+      }
+    }
+    throw new Error("no parseable JSON in response");
   }
 }
 
@@ -364,7 +393,7 @@ export async function searchQueryFor(headline: string): Promise<string> {
       query: {
         type: "string",
         description:
-          "An X (Twitter) search query. Use the distinctive proper nouns and 2-3 salient terms, OR-ing synonyms. Do NOT include the whole headline. Keep it under 120 characters.",
+          "An X (Twitter) search query. Use the distinctive proper nouns and 2-3 salient terms, OR-ing synonyms. Do NOT include the whole headline. NO wildcards (*) — X rejects them; write the variants out instead. Keep it under 120 characters.",
       },
     },
     required: ["query"],
@@ -382,7 +411,9 @@ The headline is a synthesised summary and will not appear verbatim in any post. 
     (raw) => raw as { query: string },
   );
 
-  const q = (out.query || headline).slice(0, 120);
+  // belt and braces: X returns 400 for a '*' anywhere in a term, and one bad
+  // query shouldn't cost us the whole expand
+  const q = (out.query || headline).replace(/\*/g, "").slice(0, 120).trim();
   return `${q} -is:retweet lang:en`;
 }
 
@@ -515,7 +546,10 @@ Search beyond any one bubble — prefer posts from accounts arguing this directl
 
   // With tools enabled the model sometimes prefixes prose before the JSON, so
   // take the last balanced object rather than trusting the whole string.
-  const parsed = extractJson<{ summary?: string; children: XSearchChild[] }>(text);
+  const parsed = extractJson<{ summary?: string; children: XSearchChild[] }>(
+    text,
+    (o) => Array.isArray((o as { children?: unknown })?.children),
+  );
   const posts: XPost[] = [];
   const children: GrokChild[] = [];
 

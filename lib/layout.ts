@@ -15,18 +15,39 @@ export const COL_GAP = 44;
 export const CARD_GAP = 26;
 export const TOP_PAD = 88;
 export const LEFT_PAD = 56;
+/** breathing room between a track's edge and the cards it encloses */
+export const TRACK_PAD = 16;
 
 export interface PositionedCard {
   node: BranchNode;
   x: number;
   y: number;
   w: number;
-  /** rendered height — an expanded parent stretches to cover its whole subtree */
+  /** rendered height — always the card's own content height */
   h: number;
   /** vertical extent this node's entire subtree occupies */
   band: number;
   col: number;
   expanded: boolean;
+}
+
+/**
+ * The containment slab drawn behind an open node AND its whole subtree.
+ *
+ * This is the parent link. The board previously implied it by stretching the
+ * parent card down over its band, which produced a 600px card with 130px of
+ * text in it — read as "giant empty box", not "this contains those". A slab
+ * states the relationship directly and lets the card go back to its own size.
+ */
+export interface TrackBox {
+  key: string;
+  nodeId: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** nesting level — deeper slabs sit brighter and on top */
+  depth: number;
 }
 
 /** A child that Grok is still writing. Occupies real space so nothing jumps. */
@@ -44,6 +65,8 @@ export interface SkeletonBox {
 export interface Layout {
   cards: PositionedCard[];
   skeletons: SkeletonBox[];
+  /** shallowest first, so deeper slabs paint on top of their ancestors */
+  tracks: TrackBox[];
   byId: Record<string, PositionedCard>;
   width: number;
   height: number;
@@ -89,8 +112,8 @@ function byPriority(a: BranchNode, b: BranchNode) {
  * does, and it's what makes the board read as organised instead of as cards
  * that happen to be near each other.
  *
- * An expanded parent also stretches to its band height, so its surface visibly
- * contains everything it opened.
+ * An open node's whole band is then wrapped in a TrackBox — the slab that
+ * makes "these belong to that" explicit instead of merely implied by adjacency.
  */
 export function computeLayout(
   board: Board,
@@ -102,6 +125,7 @@ export function computeLayout(
 ): Layout {
   const cards: PositionedCard[] = [];
   const skeletons: SkeletonBox[] = [];
+  const tracks: TrackBox[] = [];
   const byId: Record<string, PositionedCard> = {};
 
   const kidsOf = (node: BranchNode) =>
@@ -110,23 +134,34 @@ export function computeLayout(
       .filter(Boolean)
       .sort(byPriority);
 
-  /** Places `node` with its top at `top`; returns the band height it consumed. */
-  const place = (node: BranchNode, depth: number, top: number): number => {
+  /**
+   * Places `node` with its top at `top`. Returns the band height it consumed
+   * and the rightmost edge anything in its subtree reached — the track needs
+   * both to enclose the whole family.
+   */
+  const place = (
+    node: BranchNode,
+    depth: number,
+    top: number,
+  ): { band: number; right: number } => {
     const own = heights[node.id] ?? estimateCardHeight(node);
     const isPending = pending.has(node.id);
     const isOpen = expanded.has(node.id) || isPending;
+    const x = LEFT_PAD + depth * (CARD_W + COL_GAP);
     const childX = LEFT_PAD + (depth + 1) * (CARD_W + COL_GAP);
 
     let childrenExtent = 0;
+    let right = x + CARD_W;
+
     // hard depth stop: spaghetti is a product bug (doc §3.4)
     if (isOpen && depth < 8) {
       const kids = kidsOf(node);
       let cursor = top;
 
       if (isPending && kids.length === 0) {
-        // Reserve the band NOW, before Grok answers. The parent stretches and
-        // the siblings below drop immediately, so when real text lands it
-        // fills space that was already made for it — no jump, no reflow.
+        // Reserve the band NOW, before Grok answers. The siblings below drop
+        // immediately, so when real text lands it fills space that was already
+        // made for it — no jump, no reflow.
         SKELETON_SHAPES.forEach((shape, i) => {
           skeletons.push({
             key: `${node.id}:skel:${i}`,
@@ -140,9 +175,12 @@ export function computeLayout(
           cursor += shape.h + CARD_GAP;
         });
         childrenExtent = cursor - CARD_GAP - top;
+        right = Math.max(right, childX + CARD_W);
       } else {
         for (const kid of kids) {
-          cursor += place(kid, depth + 1, cursor) + CARD_GAP;
+          const sub = place(kid, depth + 1, cursor);
+          cursor += sub.band + CARD_GAP;
+          right = Math.max(right, sub.right);
         }
         if (kids.length) childrenExtent = cursor - CARD_GAP - top;
       }
@@ -151,18 +189,33 @@ export function computeLayout(
     const band = Math.max(own, childrenExtent);
     const card: PositionedCard = {
       node,
-      x: LEFT_PAD + depth * (CARD_W + COL_GAP),
+      x,
       y: top,
       w: CARD_W,
-      // an open parent grows to contain its subtree
-      h: isOpen && childrenExtent > own ? band : own,
+      // The card is its own size, always. Containment is the track's job now;
+      // stretching the card to its band was what produced the empty boxes.
+      h: own,
       band,
       col: depth,
       expanded: isOpen,
     };
     cards.push(card);
     byId[node.id] = card;
-    return band;
+
+    // Only draw a slab where there is actually a family to enclose.
+    if (isOpen && childrenExtent > 0) {
+      tracks.push({
+        key: `${node.id}:track`,
+        nodeId: node.id,
+        x: x - TRACK_PAD,
+        y: top - TRACK_PAD,
+        w: right + TRACK_PAD - (x - TRACK_PAD),
+        h: band + TRACK_PAD * 2,
+        depth,
+      });
+    }
+
+    return { band, right };
   };
 
   let cursor = TOP_PAD;
@@ -170,14 +223,18 @@ export function computeLayout(
     .map((id) => board.nodes[id])
     .filter(Boolean)
     .sort(byPriority)) {
-    cursor += place(root, 0, cursor) + CARD_GAP;
+    cursor += place(root, 0, cursor).band + CARD_GAP;
   }
 
-  const boxes = [...cards, ...skeletons];
+  // Recursion emits children before parents; painting order has to be the
+  // reverse or an ancestor's slab would cover every slab nested inside it.
+  tracks.sort((a, b) => a.depth - b.depth);
+
+  const boxes = [...cards, ...skeletons, ...tracks];
   const width = boxes.reduce((m, c) => Math.max(m, c.x + c.w), 0) + LEFT_PAD;
   const height = boxes.reduce((m, c) => Math.max(m, c.y + c.h), 0) + TOP_PAD;
 
-  return { cards, skeletons, byId, width, height };
+  return { cards, skeletons, tracks, byId, width, height };
 }
 
 /** Where the hover ghost sits: one column right, aligned to the hovered card. */

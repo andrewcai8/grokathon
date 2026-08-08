@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type { Board, BranchNode, Fork } from "./schema";
 import { computeLayout, type Layout } from "./layout";
+import { rollUpCitations } from "./boardBuilder";
 import { DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, clamp, frameRect, zoomAbout } from "./lod";
 
 interface BoardState {
@@ -26,6 +27,7 @@ interface BoardState {
     children: BranchNode[],
     posts?: Board["posts"],
     append?: boolean,
+    summary?: string,
   ) => void;
 
   toggle: (id: string) => void;
@@ -114,7 +116,7 @@ export const useBoard = create<BoardState>((set, get) => ({
     set({ board, expanded, pending, layout: relayout(board, expanded, pending) });
   },
 
-  mergeChildren: (parentId, children, posts, append = false) => {
+  mergeChildren: (parentId, children, posts, append = false, summary) => {
     const { board, expanded } = get();
     if (!board) return;
 
@@ -123,15 +125,21 @@ export const useBoard = create<BoardState>((set, get) => ({
     if (!parent) return;
 
     for (const child of children) nodes[child.id] = child;
-    nodes[parentId] = {
-      ...parent,
-      // a fork ADDS a branch alongside what's already open; it doesn't replace it
-      children_ids: append
-        ? [...parent.children_ids, ...children.map((c) => c.id)]
-        : children.map((c) => c.id),
-      has_children: children.length > 0,
-      updated_at: new Date().toISOString(),
-    };
+    // a trending root has no posts of its own; it adopts its children's
+    // verified citations so every card on the board carries grounding
+    nodes[parentId] = rollUpCitations(
+      {
+        ...parent,
+        // a fork ADDS a branch alongside what's already open; it doesn't replace it
+        children_ids: append
+          ? [...parent.children_ids, ...children.map((c) => c.id)]
+          : children.map((c) => c.id),
+        body: parent.body || summary,
+        has_children: true,
+        updated_at: new Date().toISOString(),
+      },
+      children,
+    );
 
     const next: Board = {
       ...board,

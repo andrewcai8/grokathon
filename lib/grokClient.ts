@@ -140,7 +140,8 @@ const GROUNDING_RULES: Record<Grounding, string> = {
   corpus: `The posts you are given are the ONLY ground truth. Never assert anything they do not support, and never cite an ID that is not in the supplied corpus.`,
   search: `Ground truth is the posts you find with the x_search tool. Search thoroughly before concluding anything.
 - Cite only real posts you actually found. Every URL must be a permalink you saw in results, and every quote verbatim from that post. Never fabricate either.
-- Search first, conclude second. Do not report an absence of evidence until you have looked from more than one angle.`,
+- Search first, conclude second. Do not report an absence of evidence until you have looked from more than one angle.
+- NEVER return text describing your intent ("Searching X for...", "Looking into..."). The structured output is the finished answer, produced after the tool has run — not a status update. If you have not called the tool yet, call it.`,
 };
 
 function systemFor(grounding: Grounding) {
@@ -335,6 +336,56 @@ ${posts.map(postLine).join("\n\n")}`;
 
 const X_POST_URL = /^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 
+/** Pull the last top-level JSON object out of a possibly chatty response. */
+function extractJson<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start === -1 || end <= start) throw new Error("no JSON in response");
+    return JSON.parse(text.slice(start, end + 1)) as T;
+  }
+}
+
+/**
+ * Turn a trend headline into an X search query.
+ *
+ * Trend headlines are synthesised summaries — they never appear verbatim in
+ * posts, so a literal search matches nothing. This is a language problem, and
+ * one cheap Grok call solves it. The RETRIEVAL then happens against the X API,
+ * which means the posts are real by construction rather than model-reported:
+ * a fabricated citation isn't possible, so no verification pass is needed.
+ */
+export async function searchQueryFor(headline: string): Promise<string> {
+  const schema = {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description:
+          "An X (Twitter) search query. Use the distinctive proper nouns and 2-3 salient terms, OR-ing synonyms. Do NOT include the whole headline. Keep it under 120 characters.",
+      },
+    },
+    required: ["query"],
+    additionalProperties: false,
+  };
+
+  const out = await structured<{ query: string }>(
+    "x_query",
+    schema,
+    `Write an X search query that will find posts about this story.
+
+HEADLINE: ${headline}
+
+The headline is a synthesised summary and will not appear verbatim in any post. Use the identifying entities (people, products, companies, numbers) and OR together likely phrasings. Do not add lang: or -is: filters; those are added for you.`,
+    (raw) => raw as { query: string },
+  );
+
+  const q = (out.query || headline).slice(0, 120);
+  return `${q} -is:retweet lang:en`;
+}
+
 /** Turn an x.com permalink into a real XPost we can render as a citation chip. */
 function postFromUrl(url: string, quote: string): XPost | null {
   const m = X_POST_URL.exec(url.trim());
@@ -408,10 +459,15 @@ export async function expandViaXSearch(
   node: BranchNode,
   fork: Fork,
   ancestors: string[] = [],
-): Promise<{ children: GrokChild[]; posts: XPost[] }> {
+): Promise<{ children: GrokChild[]; posts: XPost[]; summary?: string }> {
   const schema = {
     type: "object",
     properties: {
+      summary: {
+        type: "string",
+        description:
+          "2-3 sentences on what this story actually is, strictly from the posts you found. This becomes the parent card's body. Say only what the posts support.",
+      },
       children: {
         type: "array",
         minItems: 1,
@@ -419,7 +475,7 @@ export async function expandViaXSearch(
         items: XSEARCH_CHILD,
       },
     },
-    required: ["children"],
+    required: ["summary", "children"],
     additionalProperties: false,
   };
 
@@ -427,7 +483,9 @@ export async function expandViaXSearch(
 title: ${node.title}
 body: ${node.body ?? "(none)"}
 
-Search X and return AT MOST ${MAX_CHILDREN} children.
+${node.body ? "" : "This node is a trending headline with no posts attached to it yet. The search IS how it becomes grounded.\n\n"}SEARCH FIRST. Call x_search before you answer — do not describe what you are about to do, and do not write your answer from prior knowledge. Everything below must come from posts the search actually returned.
+
+Then return AT MOST ${MAX_CHILDREN} children, plus a summary of what this story is.
 
 ${forkInstruction(fork, "search")}
 
@@ -455,7 +513,9 @@ Search beyond any one bubble — prefer posts from accounts arguing this directl
   const text = (res as unknown as { output_text?: string }).output_text;
   if (!text) throw new Error("x_search returned no content");
 
-  const parsed = JSON.parse(text) as { children: XSearchChild[] };
+  // With tools enabled the model sometimes prefixes prose before the JSON, so
+  // take the last balanced object rather than trusting the whole string.
+  const parsed = extractJson<{ summary?: string; children: XSearchChild[] }>(text);
   const posts: XPost[] = [];
   const children: GrokChild[] = [];
 
@@ -480,7 +540,7 @@ Search beyond any one bubble — prefer posts from accounts arguing this directl
     });
   }
 
-  return { children, posts };
+  return { children, posts, summary: parsed.summary };
 }
 
 /** Which forks reach outside the user's timeline. */

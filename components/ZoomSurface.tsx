@@ -305,7 +305,7 @@ export function ZoomSurface() {
             throw new Error("Grok returned nothing for this branch");
           }
           useBoard.getState().setError(id, null);
-          useBoard.getState().mergeChildren(id, data.children, data.posts, append);
+          useBoard.getState().mergeChildren(id, data.children, data.posts, append, data.summary);
           useBoard.getState().expand(id);
           requestAnimationFrame(() => revealColumn(data.children[0].id));
         })

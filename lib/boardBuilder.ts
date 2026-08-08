@@ -114,6 +114,30 @@ export function buildBoardFromTrends(
   };
 }
 
+/**
+ * Roll a parent's citations up from its children.
+ *
+ * A trending root starts with no posts — X's trends API is confirmed to carry
+ * no trend ID, no query and no post IDs, so a headline is genuinely all we get.
+ * That left root cards with no citation chips, which breaks the board's one
+ * invariant: everything shown is grounded in real posts.
+ *
+ * Once the children come back from x_search with VERIFIED posts, those posts
+ * evidence the parent topic just as much as they evidence the child claim, so
+ * the parent adopts a few. Costs nothing — no extra call — and the chips are
+ * the same verified posts, not a second-hand claim about them.
+ */
+export function rollUpCitations(
+  parent: BranchNode,
+  children: BranchNode[],
+  limit = 3,
+): BranchNode {
+  if (parent.source_post_ids.length > 0) return parent;
+  const ids = [...new Set(children.flatMap((c) => c.source_post_ids))].slice(0, limit);
+  if (!ids.length) return parent;
+  return { ...parent, source_post_ids: ids };
+}
+
 export function childrenToNodes(
   parent: BranchNode,
   children: GrokChild[],
@@ -153,6 +177,25 @@ export function childrenToNodes(
       updated_at: now,
     };
   });
+}
+
+/**
+ * ONLY what this node and its ancestors actually cite — no top-up.
+ *
+ * This is the grounding test: does this node have evidence behind it, or is it
+ * a bare headline? relevantPosts() deliberately pads with the rest of the
+ * corpus so Grok can find new evidence, which makes it useless for that
+ * question — an ungrounded trend root looked grounded purely because some
+ * other board's posts were still in memory.
+ */
+export function citedPosts(board: Board, nodeId: string): XPost[] {
+  const ids = new Set<string>();
+  let cur: BranchNode | undefined = board.nodes[nodeId];
+  while (cur) {
+    for (const id of cur.source_post_ids) ids.add(id);
+    cur = cur.parent_id ? board.nodes[cur.parent_id] : undefined;
+  }
+  return [...ids].map((id) => board.posts[id]).filter(Boolean);
 }
 
 /** Posts relevant to a node: its own citations plus its ancestors'. */

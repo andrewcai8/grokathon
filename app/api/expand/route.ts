@@ -3,16 +3,19 @@ import {
   expandNode,
   expandViaXSearch,
   hasGrok,
+  searchQueryFor,
   XSEARCH_FORKS,
 } from "@/lib/grokClient";
 import {
   ancestorTitles,
   childrenToNodes,
+  citedPosts,
   relevantPosts,
+  rollUpCitations,
 } from "@/lib/boardBuilder";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
-import { getPostsByIds } from "@/lib/xClient";
+import { getPostsByIds, searchRecent } from "@/lib/xClient";
 import {
   ForkSchema,
   type Board,
@@ -119,7 +122,10 @@ export async function POST(req: Request) {
         seed: { mode: "my_day", label: "client" },
         nodes: { [nodeId]: node },
         root_ids: [nodeId],
-        posts: { ...(serverBoard?.posts ?? {}), ...(body.posts ?? {}) },
+        // deliberately NOT merging serverBoard.posts: this node isn't from
+        // that board, and borrowing its corpus made ungrounded nodes look
+        // grounded, which routed bare headlines away from x_search
+        posts: body.posts ?? {},
       };
 
   // Already expanded on this fork — serve from the graph, instantly.
@@ -162,15 +168,55 @@ export async function POST(req: Request) {
     // But a trending board's roots are headlines with no posts behind them at
     // all, so there is no corpus to reason from. Anything with an empty corpus
     // must search, or we'd be asking Grok to expand on nothing.
-    const corpus = relevantPosts(board, nodeId);
-    const useXSearch = (XSEARCH_FORKS.has(fork) || corpus.length === 0) && hasGrok();
-
     let raw;
+    let summary: string | undefined;
     let newPosts: Record<string, XPost> = {};
+
+    /**
+     * Retrieval strategy.
+     *
+     * A node with no citations behind it (a bare trending headline) needs
+     * grounding before it can be expanded. We do that with the X API rather
+     * than x_search: Grok writes the query, X returns the posts. Real posts by
+     * construction — a fabricated citation isn't possible — and it's ~3s
+     * instead of ~20s.
+     *
+     * x_search is kept for the forks that are open-ended discovery ("find the
+     * strongest opposing argument"), which no keyword query can express.
+     */
+    const grounded = citedPosts(board, nodeId).length > 0;
+    let corpus = grounded ? relevantPosts(board, nodeId) : [];
+    let groundedNow = false;
+
+    if (!grounded && !XSEARCH_FORKS.has(fork)) {
+      const tok = await activeToken();
+      if (tok?.access_token) {
+        try {
+          const q = await searchQueryFor(node.title);
+          const found = await searchRecent(tok.access_token, q, 40);
+          if (found.length) {
+            corpus = found;
+            newPosts = Object.fromEntries(found.map((p) => [p.id, p]));
+            groundedNow = true;
+            console.log("[expand] grounded %s via X search: %s -> %d posts",
+              nodeId, q, found.length);
+          }
+        } catch (err) {
+          console.warn("[expand] X grounding failed, falling back:", err);
+        }
+      }
+    }
+
+    // fall back to x_search when the X API couldn't ground it, or for the
+    // discovery forks
+    const useXSearch =
+      hasGrok() && (XSEARCH_FORKS.has(fork) || (!grounded && !groundedNow));
+
     if (useXSearch) {
       const out = await expandViaXSearch(node, fork, ancestors);
       raw = out.children;
-      newPosts = await verifyCitations(out.posts);
+      newPosts = { ...newPosts, ...(await verifyCitations(out.posts)) };
+      summary = out.summary;
     } else {
       raw = await expandNode(node, fork, corpus, ancestors);
     }
@@ -182,15 +228,21 @@ export async function POST(req: Request) {
     if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
       const nodes = { ...b.nodes };
       for (const c of children) nodes[c.id] = c;
-      nodes[nodeId] = {
-        ...nodes[nodeId],
-        children_ids:
-          fork === "deeper"
-            ? children.map((c) => c.id)
-            : [...nodes[nodeId].children_ids, ...children.map((c) => c.id)],
-        has_children: true,
-        updated_at: new Date().toISOString(),
-      };
+      nodes[nodeId] = rollUpCitations(
+        {
+          ...nodes[nodeId],
+          children_ids:
+            fork === "deeper"
+              ? children.map((c) => c.id)
+              : [...nodes[nodeId].children_ids, ...children.map((c) => c.id)],
+          // a bare trending headline gets its story once we've actually
+          // searched — grounded now, so writing it is no longer an invention
+          body: nodes[nodeId].body || summary,
+          has_children: true,
+          updated_at: new Date().toISOString(),
+        },
+        children,
+      );
       return { ...b, nodes, posts: { ...b.posts, ...newPosts } };
     });
 
@@ -199,6 +251,7 @@ export async function POST(req: Request) {
       children,
       posts: newPosts,
       fork,
+      summary,
       source: useXSearch ? "x_search" : "timeline",
     });
   } catch (err) {

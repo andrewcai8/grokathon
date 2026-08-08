@@ -7,6 +7,18 @@ import { CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
 import { BranchCard } from "./BranchCard";
 import { GhostColumn } from "./GhostColumn";
 import { SkeletonCard } from "./SkeletonCard";
+import type { Board } from "@/lib/schema";
+
+/** Titles from root down to (not including) this node, for prompt context. */
+function ancestorsOf(board: Board | null, id: string): string[] {
+  const out: string[] = [];
+  let cur = board?.nodes[id]?.parent_id ? board.nodes[board.nodes[id].parent_id!] : undefined;
+  while (cur) {
+    out.unshift(cur.title);
+    cur = cur.parent_id ? board?.nodes[cur.parent_id] : undefined;
+  }
+  return out;
+}
 
 /**
  * The demo payload.
@@ -19,6 +31,7 @@ import { SkeletonCard } from "./SkeletonCard";
 export function ZoomSurface() {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const hudRef = useRef<HTMLSpanElement>(null);
   const rafRef = useRef<number | null>(null);
 
   const board = useBoard((s) => s.board);
@@ -27,6 +40,7 @@ export function ZoomSurface() {
   const pending = useBoard((s) => s.pending);
   const hoveredId = useBoard((s) => s.hoveredId);
   const selectedId = useBoard((s) => s.selectedId);
+  const errors = useBoard((s) => s.errors);
   const setHovered = useBoard((s) => s.setHovered);
 
   // ---- imperative view application -----------------------------------------
@@ -38,10 +52,26 @@ export function ZoomSurface() {
       const lod = lodFor(zoom);
       stage.style.transform = `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`;
       stage.style.setProperty("--body-color", lod.bodyColor);
+      stage.style.setProperty("--attribution-opacity", String(lod.attributionOpacity));
+      // a fully-faded citation chip / fork button must not still be clickable
+      stage.style.setProperty(
+        "--attribution-events",
+        lod.attributionOpacity < 0.05 ? "none" : "auto",
+      );
       stage.style.setProperty("--detail-opacity", String(lod.detailOpacity));
       stage.style.setProperty("--body-reveal", String(lod.bodyReveal));
       stage.style.setProperty("--title-weight", String(lod.titleWeight));
       stage.style.setProperty("--ghost-opacity", String(0.55 + 0.45 * lod.bodyReveal));
+
+      // The grid is locked to the BOARD, not the screen: it scales and slides
+      // with the transform, so the surface reads as a plane you're flying over.
+      const el = containerRef.current;
+      if (el) {
+        const g = 96 * zoom;
+        el.style.backgroundSize = `${g}px ${g}px, ${g}px ${g}px`;
+        el.style.backgroundPosition = `${pan.x}px ${pan.y}px, ${pan.x}px ${pan.y}px`;
+      }
+      if (hudRef.current) hudRef.current.textContent = `${Math.round(zoom * 100)}%`;
     };
     apply();
     return useBoard.subscribe(apply);
@@ -256,16 +286,35 @@ export function ZoomSurface() {
       void fetch("/api/expand", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ nodeId: id, fork }),
+        body: JSON.stringify({
+          nodeId: id,
+          fork,
+          // send our copy so expand works even if the server's board differs
+          node: s.board?.nodes[id],
+          ancestors: ancestorsOf(s.board, id),
+          posts: s.board?.posts,
+        }),
       })
-        .then((r) => r.json())
+        .then(async (r) => {
+          const data = await r.json().catch(() => null);
+          if (!r.ok) throw new Error(data?.error ?? `expand failed (${r.status})`);
+          return data;
+        })
         .then((data) => {
-          if (!data?.children?.length) return;
+          if (!data?.children?.length) {
+            throw new Error("Grok returned nothing for this branch");
+          }
+          useBoard.getState().setError(id, null);
           useBoard.getState().mergeChildren(id, data.children, data.posts, append);
           useBoard.getState().expand(id);
           requestAnimationFrame(() => revealColumn(data.children[0].id));
         })
-        .catch(() => {})
+        .catch((err: unknown) => {
+          // a silent failure is indistinguishable from a dead card — say it
+          useBoard
+            .getState()
+            .setError(id, err instanceof Error ? err.message : "expand failed");
+        })
         .finally(() => useBoard.getState().setPending(id, false));
     },
     [revealColumn, revealChildColumnOf],
@@ -286,11 +335,19 @@ export function ZoomSurface() {
       const node = s.board?.nodes[id];
       if (!node) return;
 
+      // Always select first. Even when nothing else happens, the click has to
+      // register — selection is what reveals the fork actions, and an inert
+      // card is indistinguishable from a broken one.
+      s.select(id);
+      s.setError(id, null);
+
       if (node.children_ids.length > 0) {
         s.expand(id);
         requestAnimationFrame(() => revealColumn(node.children_ids[0]));
-      } else if (node.has_children) {
-        // children not fetched yet — ask Grok
+      } else {
+        // The board is infinitely recursive: there is always a more specific
+        // question, so we never refuse to expand. If Grok truly has nothing
+        // deeper it says so in a node, which is an answer rather than silence.
         requestExpand(id, "deeper", false);
       }
     },
@@ -299,7 +356,8 @@ export function ZoomSurface() {
 
   const hoveredCard =
     hoveredId && !expanded.has(hoveredId) ? layout?.byId[hoveredId] : undefined;
-  const showGhost = hoveredCard?.node.has_children;
+  // every card previews, because every card can be expanded
+  const showGhost = Boolean(hoveredCard);
 
   // NOTE: the container must mount on the very first render, even with no
   // board. It carries the ref that the wheel/drag/resize effects bind to, and
@@ -308,7 +366,7 @@ export function ZoomSurface() {
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 cursor-grab touch-none overflow-hidden bg-[#efefed] active:cursor-grabbing"
+      className="gb-grid relative flex-1 cursor-grab touch-none overflow-hidden active:cursor-grabbing"
     >
       <div
         ref={stageRef}
@@ -327,12 +385,32 @@ export function ZoomSurface() {
             card={card}
             board={board}
             pending={pending.has(card.node.id)}
+            error={errors[card.node.id]}
             selected={selectedId === card.node.id}
             onToggle={onToggle}
             onHover={setHovered}
             onFork={onFork}
           />
         )) : null}
+      </div>
+
+      {/* Scale + controls readout. Written imperatively from the same subscribe
+          tick as the transform, so the HUD never costs a React render. */}
+      <div
+        className="gb-label pointer-events-none absolute bottom-4 left-5 flex items-center gap-3 border px-2.5 py-[7px]"
+        style={{
+          color: "var(--gb-faint)",
+          borderColor: "var(--gb-line)",
+          background: "rgba(0,0,0,0.6)",
+          borderRadius: 2,
+          backdropFilter: "blur(8px)",
+        }}
+      >
+        <span ref={hudRef} className="tabular-nums" style={{ color: "var(--gb-dim)" }}>
+          62%
+        </span>
+        <span className="h-px w-6" style={{ background: "var(--gb-line)" }} />
+        <span>Scroll pan · Shift zoom · 0 reset</span>
       </div>
     </div>
   );

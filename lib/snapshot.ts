@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Board } from "./schema";
 
@@ -32,14 +32,5 @@ export async function loadSnapshot(name = "latest"): Promise<Board | null> {
     return { ...board, seed: { ...board.seed, snapshot: true } };
   } catch {
     return null;
-  }
-}
-
-export async function listSnapshots(): Promise<string[]> {
-  try {
-    const files = await readdir(DIR);
-    return files.filter((f) => f.endsWith(".json")).map((f) => f.replace(/\.json$/, ""));
-  } catch {
-    return [];
   }
 }

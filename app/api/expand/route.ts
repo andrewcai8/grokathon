@@ -1,12 +1,74 @@
 import { NextResponse } from "next/server";
-import { expandNode, hasGrok } from "@/lib/grokClient";
+import {
+  expandNode,
+  expandViaXSearch,
+  hasGrok,
+  XSEARCH_FORKS,
+} from "@/lib/grokClient";
 import {
   ancestorTitles,
   childrenToNodes,
   relevantPosts,
 } from "@/lib/boardBuilder";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
-import { ForkSchema, type Fork } from "@/lib/schema";
+import { activeToken } from "@/lib/xAuth";
+import { getPostsByIds } from "@/lib/xClient";
+import {
+  ForkSchema,
+  type Board,
+  type BranchNode,
+  type Fork,
+  type XPost,
+} from "@/lib/schema";
+
+/**
+ * Check every post Grok says it found against the real X API.
+ *
+ * x_search returns a URL and a quote that the MODEL wrote. Rendering that as
+ * "@someone said X" without checking means we can put invented words in a real
+ * person's mouth, under their name, with a permalink that makes it look
+ * sourced. For a product whose entire claim is epistemic honesty that is the
+ * one unacceptable failure.
+ *
+ * Verified posts get the REAL text and metrics substituted for Grok's quote.
+ * Posts that don't resolve are dropped entirely. If we have no X token we
+ * can't check, so they survive but are flagged unverified and rendered as
+ * such — never silently passed off as confirmed.
+ */
+async function verifyCitations(posts: XPost[]): Promise<Record<string, XPost>> {
+  if (!posts.length) return {};
+
+  const token = await activeToken();
+  if (!token?.access_token) {
+    console.warn("[expand] no X token — %d citations unverified", posts.length);
+    return Object.fromEntries(posts.map((p) => [p.id, { ...p, unverified: true }]));
+  }
+
+  try {
+    const real = await getPostsByIds(
+      token.access_token,
+      posts.map((p) => p.id),
+    );
+    const kept: Record<string, XPost> = {};
+    for (const p of posts) {
+      const confirmed = real.get(p.id);
+      if (confirmed) kept[p.id] = confirmed;
+    }
+    const dropped = posts.length - Object.keys(kept).length;
+    if (dropped > 0) {
+      console.warn(
+        "[expand] dropped %d/%d citations that do not exist on X",
+        dropped,
+        posts.length,
+      );
+    }
+    return kept;
+  } catch (err) {
+    // verification itself failed (rate limit, network) — flag, don't fabricate
+    console.error("[expand] citation verification failed:", err);
+    return Object.fromEntries(posts.map((p) => [p.id, { ...p, unverified: true }]));
+  }
+}
 
 /**
  * The expand contract (doc §3.4): structured children, never a chat dump.
@@ -16,6 +78,20 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     nodeId?: string;
     fork?: string;
+    /**
+     * The client's own copy of the node it clicked, plus context.
+     *
+     * The server keeps a board in module memory, but the client can legitimately
+     * hold one the server doesn't: the fixture board painted on the first frame,
+     * a second tab, or anything after a reseed. That mismatch produced
+     * "404 unknown node" on real clicks. Trusting the client's node for the
+     * prompt costs nothing — Grok only ever writes meaning, and identity and
+     * wiring are still assigned server-side — and it makes expand independent
+     * of server memory.
+     */
+    node?: BranchNode;
+    ancestors?: string[];
+    posts?: Record<string, XPost>;
   };
   const nodeId = body.nodeId;
   if (!nodeId) {
@@ -26,19 +102,46 @@ export async function POST(req: Request) {
     ? (body.fork as Fork)
     : "deeper";
 
-  const board = getBoard();
-  if (!board) {
-    return NextResponse.json({ error: "no board" }, { status: 409 });
-  }
-  const node = board.nodes[nodeId];
+  const serverBoard = getBoard();
+  const node = serverBoard?.nodes[nodeId] ?? body.node;
   if (!node) {
-    return NextResponse.json({ error: "unknown node" }, { status: 404 });
+    return NextResponse.json(
+      { error: "unknown node and none supplied" },
+      { status: 404 },
+    );
   }
 
-  // already expanded on this fork — serve from the graph, instantly
-  if (fork === "deeper" && node.children_ids.length > 0) {
+  // Prefer the server's graph; fall back to whatever the client sent.
+  const board: Board = serverBoard?.nodes[nodeId]
+    ? serverBoard
+    : {
+        date: new Date().toISOString().slice(0, 10),
+        seed: { mode: "my_day", label: "client" },
+        nodes: { [nodeId]: node },
+        root_ids: [nodeId],
+        posts: { ...(serverBoard?.posts ?? {}), ...(body.posts ?? {}) },
+      };
+
+  // Already expanded on this fork — serve from the graph, instantly.
+  //
+  // This is what makes rehearsal work: walking the demo path once warms every
+  // node, so on stage a counter fork that costs ~38s cold returns in ~0ms. It
+  // also stops a second click on the same fork from appending duplicates.
+  const alreadyFetched = node.children_ids
+    .map((id) => board.nodes[id])
+    .filter(Boolean)
+    .filter((c) => (fork === "deeper" ? !c.fork : c.fork === fork));
+
+  if (alreadyFetched.length > 0) {
     return NextResponse.json({
-      children: node.children_ids.map((id) => board.nodes[id]).filter(Boolean),
+      children: alreadyFetched,
+      posts: Object.fromEntries(
+        alreadyFetched
+          .flatMap((c) => c.source_post_ids)
+          .map((id) => [id, board.posts[id]])
+          .filter(([, p]) => Boolean(p)),
+      ),
+      fork,
       cached: true,
     });
   }
@@ -48,11 +151,30 @@ export async function POST(req: Request) {
   }
 
   try {
-    const posts = relevantPosts(board, nodeId);
-    const raw = await expandNode(node, fork, posts, ancestorTitles(board, nodeId));
-    const children = childrenToNodes(node, raw, board.posts, fork);
+    const ancestors = serverBoard?.nodes[nodeId]
+      ? ancestorTitles(board, nodeId)
+      : (body.ancestors ?? []);
 
-    patchBoard((b) => {
+    // Forks that are about what OTHER people think go to x_search, so they can
+    // cite accounts the user doesn't follow. "deeper" stays on the timeline
+    // corpus: it's about this story as it reached you, and it's ~7s faster.
+    const useXSearch = XSEARCH_FORKS.has(fork) && hasGrok();
+
+    let raw;
+    let newPosts: Record<string, XPost> = {};
+    if (useXSearch) {
+      const out = await expandViaXSearch(node, fork, ancestors);
+      raw = out.children;
+      newPosts = await verifyCitations(out.posts);
+    } else {
+      raw = await expandNode(node, fork, relevantPosts(board, nodeId), ancestors);
+    }
+
+    const postsForCitations = { ...board.posts, ...newPosts };
+    const children = childrenToNodes(node, raw, postsForCitations, fork);
+
+    // only patch the server graph when it actually owns this node
+    if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
       const nodes = { ...b.nodes };
       for (const c of children) nodes[c.id] = c;
       nodes[nodeId] = {
@@ -64,10 +186,16 @@ export async function POST(req: Request) {
         has_children: true,
         updated_at: new Date().toISOString(),
       };
-      return { ...b, nodes };
+      return { ...b, nodes, posts: { ...b.posts, ...newPosts } };
     });
 
-    return NextResponse.json({ children, fork });
+    // ship the posts back so the client can render their citation chips
+    return NextResponse.json({
+      children,
+      posts: newPosts,
+      fork,
+      source: useXSearch ? "x_search" : "timeline",
+    });
   } catch (err) {
     console.error("[expand]", err);
     return NextResponse.json(

@@ -15,6 +15,9 @@ interface Props {
 /**
  * Not a static list of roots. It grows and indents as you expand, mirroring the
  * open subtree — orientation, back-button and jump target in one.
+ *
+ * Reads as an index/manifest: mono masthead, hairline rules, indent guides for
+ * depth. It is the one place on screen that stays still while the board moves.
  */
 export function TocRail({
   board,
@@ -46,36 +49,87 @@ export function TocRail({
   }
 
   return (
-    <aside className="flex h-full w-[228px] shrink-0 flex-col border-r border-black/[0.055] bg-[#f4f4f2]">
-      <div className="px-5 pb-3 pt-5">
-        <div className="text-[13px] font-bold tracking-[-0.008em] text-neutral-900">
+    <aside
+      className="flex h-full w-[248px] shrink-0 flex-col"
+      style={{
+        background: "var(--gb-panel)",
+        borderRight: "1px solid var(--gb-line)",
+      }}
+    >
+      <div
+        className="px-5 pb-4 pt-5"
+        style={{ borderBottom: "1px solid var(--gb-line)" }}
+      >
+        <div
+          className="gb-label mb-3.5"
+          style={{ color: "var(--gb-faint)", letterSpacing: "0.22em" }}
+        >
+          Grok Branches
+        </div>
+        <div
+          className="text-[13px] leading-[1.3] tracking-[-0.01em]"
+          style={{ color: "var(--gb-text)", fontWeight: 600 }}
+        >
           {seedLabel}
         </div>
-        <div className="mt-0.5 text-[11px] text-neutral-400">
-          {new Date(`${date}T12:00:00Z`).toLocaleDateString(undefined, {
-            month: "long",
-            day: "numeric",
-          })}
+        <div className="gb-label mt-2 flex items-center gap-2" style={{ color: "var(--gb-faint)" }}>
+          <span>
+            {new Date(`${date}T12:00:00Z`)
+              .toLocaleDateString("en-US", {
+                month: "short",
+                day: "2-digit",
+                year: "numeric",
+              })
+              .toUpperCase()}
+          </span>
+          <span className="h-px flex-1" style={{ background: "var(--gb-line)" }} />
+          <span className="tabular-nums">{rows.length} NODES</span>
         </div>
       </div>
 
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-5">
-        {rows.map((row) => (
-          <button
-            key={row.id}
-            onClick={() => onJump(row.id)}
-            style={{ paddingLeft: 12 + row.depth * 13 }}
-            className={`block w-full rounded-md py-[5px] pr-2 text-left text-[11.5px] leading-[1.35] transition-colors ${
-              selectedId === row.id
-                ? "bg-black/[0.06] text-neutral-900"
-                : row.depth === 0
-                  ? "text-neutral-700 hover:bg-black/[0.035]"
-                  : "text-neutral-500 hover:bg-black/[0.035]"
-            }`}
-          >
-            {row.title}
-          </button>
-        ))}
+      <nav className="min-h-0 flex-1 overflow-y-auto py-3 pr-2">
+        {rows.map((row) => {
+          const active = selectedId === row.id;
+          return (
+            <button
+              key={row.id}
+              onClick={() => onJump(row.id)}
+              className="group relative block w-full py-[6px] pr-2 text-left text-[11.5px] leading-[1.4] transition-colors"
+              style={{
+                paddingLeft: 20 + row.depth * 14,
+                color: active
+                  ? "var(--gb-text)"
+                  : row.depth === 0
+                    ? "var(--gb-dim)"
+                    : "var(--gb-faint)",
+                background: active ? "rgba(255,255,255,0.05)" : "transparent",
+              }}
+              onMouseEnter={(e) => {
+                if (!active) e.currentTarget.style.color = "var(--gb-text)";
+              }}
+              onMouseLeave={(e) => {
+                if (!active)
+                  e.currentTarget.style.color =
+                    row.depth === 0 ? "var(--gb-dim)" : "var(--gb-faint)";
+              }}
+            >
+              {/* indent guide — one hairline per level of depth */}
+              {Array.from({ length: row.depth }).map((_, i) => (
+                <span
+                  key={i}
+                  className="absolute top-0 h-full w-px"
+                  style={{ left: 20 + i * 14 - 7, background: "var(--gb-line)" }}
+                />
+              ))}
+              {/* selection spine */}
+              <span
+                className="absolute left-0 top-0 h-full w-[2px]"
+                style={{ background: active ? "var(--gb-text)" : "transparent" }}
+              />
+              {row.title}
+            </button>
+          );
+        })}
       </nav>
 
       {footer}

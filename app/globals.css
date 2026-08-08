@@ -5,6 +5,33 @@
   --font-mono: var(--font-geist-mono);
 }
 
+/* --------------------------------------------------------------------------
+   Design tokens — xAI / SpaceX register.
+   Pure black ground, hairline structure, near-monochrome. Colour is a SIGNAL,
+   never decoration: the only saturated pixels on the board mean "contested" or
+   "flagged". Everything else lives on the grayscale ramp.
+   -------------------------------------------------------------------------- */
+
+:root {
+  --gb-bg: #000000;
+  --gb-panel: #050506;
+  --gb-surface: #0c0c0e;
+  --gb-surface-hi: #141418;
+
+  --gb-line: rgba(255, 255, 255, 0.085);
+  --gb-line-hi: rgba(255, 255, 255, 0.2);
+  --gb-line-max: rgba(255, 255, 255, 0.38);
+
+  --gb-text: #f2f2f4;
+  --gb-dim: #7c7c86;
+  --gb-faint: #46464e;
+
+  --gb-live: #3ddc97;
+  --gb-warn: #e8a33d;
+  --gb-flag: #ff6b4a;
+  --gb-proj: #9d8cff;
+}
+
 html,
 body {
   height: 100%;
@@ -12,11 +39,47 @@ body {
 }
 
 body {
-  background: #efefed;
-  color: #171717;
+  background: var(--gb-bg);
+  color: var(--gb-text);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* the UA's blue focus ring is the one off-brand pixel the theme can't override
+   from a component — keep the accessibility affordance, restate it in the
+   board's own hairline language */
+:focus-visible {
+  outline: 1px solid var(--gb-line-max);
+  outline-offset: 1px;
+}
+
+/* Technical metadata — uppercase mono, wide tracking. The SpaceX telemetry
+   voice. Used for every label that is data ABOUT the board, never content. */
+.gb-label {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 9.5px;
+  line-height: 1;
+}
+
+/* --------------------------------------------------------------------------
+   The canvas grid. Sized and offset imperatively from zoom/pan so it locks to
+   the board rather than the screen — the surface reads as a plane you are
+   flying over, not a background image.
+   -------------------------------------------------------------------------- */
+
+.gb-grid {
+  background-color: var(--gb-bg);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+  background-repeat: repeat, repeat;
 }
 
 /* --------------------------------------------------------------------------
@@ -26,10 +89,12 @@ body {
    -------------------------------------------------------------------------- */
 
 .gb-stage {
-  --body-color: #c9c9c9;
+  --body-color: #303038;
+  --attribution-opacity: 0;
+  --attribution-events: none;
   --detail-opacity: 0;
   --body-reveal: 0;
-  --title-weight: 700;
+  --title-weight: 600;
   --ghost-opacity: 0.6;
 }
 
@@ -38,12 +103,21 @@ body {
   font-weight: var(--title-weight);
 }
 
-/* body text is the thing that fades: gray texture -> readable prose */
+/* body text is the thing that fades: dark texture -> readable prose */
 .gb-body {
   color: var(--body-color);
 }
 
-/* chips and badges arrive last, once you're actually reading */
+/* Attribution rides its own ramp, well ahead of the chrome: by the time a
+   title is readable, so is its source. Never ship a legible claim with an
+   illegible citation. */
+.gb-attribution {
+  opacity: var(--attribution-opacity);
+  pointer-events: var(--attribution-events);
+  transition: opacity 90ms linear;
+}
+
+/* board chrome — node coordinates, fork provenance — arrives last */
 .gb-detail {
   opacity: var(--detail-opacity);
   transition: opacity 90ms linear;
@@ -61,21 +135,45 @@ body {
   }
 }
 
-/* the nested rounded tracks that carry the parent link. no arrows, no edges. */
-.gb-track {
-  background: rgba(0, 0, 0, 0.03);
-  transition:
-    transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
-    width 420ms cubic-bezier(0.22, 1, 0.36, 1),
-    height 420ms cubic-bezier(0.22, 1, 0.36, 1);
-}
+/* --------------------------------------------------------------------------
+   Cards.
+   Hairline-bordered panels on black, near-square corners. The light theme's
+   soft shadows carried the hierarchy before; on black, structure has to come
+   from LINE WEIGHT instead — that's the whole shift.
+   -------------------------------------------------------------------------- */
 
-/* cards glide to their new home when a column opens — this is the "bloom" */
 .gb-card {
+  background: var(--gb-surface);
+  border: 1px solid var(--gb-line);
+  border-radius: 3px;
   transition:
     transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 200ms ease,
+    background-color 200ms ease,
     box-shadow 220ms ease;
   animation: gb-card-in 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.gb-card:hover {
+  border-color: var(--gb-line-hi);
+}
+
+/* An open parent is stretched over its whole subtree. It reads as a BRACKET
+   containing the column to its right: bright left spine, dimmed fill. This
+   replaces the light theme's big sweeping corner radius, which fought the
+   square geometry. */
+.gb-card[data-expanded="true"] {
+  background: var(--gb-panel);
+  border-left-color: var(--gb-line-max);
+  box-shadow: inset 1px 0 0 var(--gb-line-max);
+}
+
+.gb-card[data-selected="true"] {
+  background: var(--gb-surface-hi);
+  border-color: var(--gb-line-max);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 20px 60px rgba(0, 0, 0, 0.9);
 }
 
 @keyframes gb-card-in {
@@ -90,7 +188,9 @@ body {
    -------------------------------------------------------------------------- */
 
 .gb-skel {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+  background: var(--gb-surface);
+  border: 1px solid var(--gb-line);
+  border-radius: 3px;
   animation: gb-card-in 300ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -98,20 +198,19 @@ body {
 .gb-skel-line {
   background: linear-gradient(
     90deg,
-    #e9e9e9 0%,
-    #e9e9e9 38%,
-    #f4f4f4 50%,
-    #e9e9e9 62%,
-    #e9e9e9 100%
+    #17171b 0%,
+    #17171b 38%,
+    #2a2a31 50%,
+    #17171b 62%,
+    #17171b 100%
   );
   background-size: 260% 100%;
   animation: gb-shimmer 1450ms ease-in-out infinite;
 }
 
-/* the title bars sit a shade darker, mirroring real type hierarchy */
+/* the title bars sit a shade brighter, mirroring real type hierarchy */
 .gb-skel-bar {
-  background-color: #dedede;
-  filter: brightness(0.965);
+  filter: brightness(1.5);
 }
 
 @keyframes gb-shimmer {
@@ -135,24 +234,6 @@ body {
   50% {
     opacity: 1;
   }
-}
-
-/* range input, restyled so the zoom control doesn't look like a form field */
-.gb-range::-webkit-slider-thumb {
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border-radius: 999px;
-  background: #171717;
-  cursor: pointer;
-}
-.gb-range::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
-  border: 0;
-  border-radius: 999px;
-  background: #171717;
-  cursor: pointer;
 }
 
 @media (prefers-reduced-motion: reduce) {

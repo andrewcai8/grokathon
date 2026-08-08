@@ -21,7 +21,19 @@ export const DEFAULT_ZOOM = 0.62;
 const BODY_FADE_START = 0.5;
 const BODY_FADE_END = 1.0;
 
-/** chips and badges are detail — they arrive last */
+/**
+ * Attribution — who said it, and how well established it is.
+ *
+ * This is NOT "detail". A claim without its source is a claim we shouldn't be
+ * making, so the citation has to be on screen wherever the title is readable.
+ * It used to share the late detail ramp, which meant the default view showed
+ * confident-looking assertions with no visible grounding — exactly the failure
+ * mode the product exists to fix. It now lands well before the resting zoom.
+ */
+const ATTRIB_FADE_START = 0.34;
+const ATTRIB_FADE_END = 0.48;
+
+/** Board chrome — node coordinates, fork provenance. Genuinely last. */
 const DETAIL_FADE_START = 0.72;
 const DETAIL_FADE_END = 1.05;
 
@@ -44,32 +56,42 @@ export interface Lod {
   bodyReveal: number;
   /** interpolated body text color */
   bodyColor: string;
-  /** post chips / epistemic badges */
+  /** citations + epistemic status — on screen wherever the title is */
+  attributionOpacity: number;
+  /** node coordinates, fork provenance — board chrome, arrives last */
   detailOpacity: number;
-  /** at low zoom we stop painting body glyphs and paint bars instead — cheaper
-   *  and, more importantly, it reads as "texture" rather than "tiny broken text" */
-  useTexture: boolean;
   /** titles never disappear, but they do settle down slightly when zoomed way in */
   titleWeight: number;
 }
 
 export function lodFor(zoom: number): Lod {
   const bodyReveal = ease(ramp(zoom, BODY_FADE_START, BODY_FADE_END));
+  const attributionOpacity = ease(ramp(zoom, ATTRIB_FADE_START, ATTRIB_FADE_END));
   const detailOpacity = ease(ramp(zoom, DETAIL_FADE_START, DETAIL_FADE_END));
 
-  // #c9c9c9 (texture) -> #3d3d3d (prose)
-  const from = 0xc9;
-  const to = 0x3d;
+  // #303038 (texture) -> #a2a2ac (prose)
+  //
+  // Inverted for the black ground: texture is now barely-above-surface, and
+  // reading means the glyphs come UP out of the card rather than down onto it.
+  // The ramp is the same instrument, played the other direction.
+  // the floor sits higher than the light theme's mirror image would suggest:
+  // dark-on-light texture stays legible as texture at lower contrast than
+  // light-on-dark does, so an exact inversion read as nothing at all.
+  const from = 0x30;
+  const to = 0xa2;
   const v = Math.round(from + (to - from) * bodyReveal);
   const hex = v.toString(16).padStart(2, "0");
+  // hold the faint blue cast of the surface all the way up the ramp
+  const b = Math.min(0xff, v + 10).toString(16).padStart(2, "0");
 
   return {
     zoom,
     bodyReveal,
-    bodyColor: `#${hex}${hex}${hex}`,
+    bodyColor: `#${hex}${hex}${b}`,
+    attributionOpacity,
     detailOpacity,
-    useTexture: bodyReveal < 0.06,
-    titleWeight: zoom > 1.2 ? 600 : 700,
+    // heavy weights bloom on black — titles settle LIGHTER as they get bigger
+    titleWeight: zoom > 1.2 ? 500 : 600,
   };
 }
 

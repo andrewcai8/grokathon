@@ -145,6 +145,32 @@ export async function getHomeTimeline(
   return normalize(json);
 }
 
+/**
+ * Resolve post IDs against X. This is the integrity check for anything Grok
+ * claims to have found: x_search hands back a URL and a quote it authored, and
+ * without this we would render invented words attributed to a real, named
+ * account with a permalink that lends them authority. Anything that doesn't
+ * come back here did not exist.
+ *
+ * Up to 100 ids per call.
+ */
+export async function getPostsByIds(
+  token: string,
+  ids: string[],
+): Promise<Map<string, XPost>> {
+  const wanted = [...new Set(ids)].slice(0, 100);
+  if (!wanted.length) return new Map();
+
+  const json = await xGet<RawResponse>("/tweets", token, {
+    ids: wanted.join(","),
+    "tweet.fields": TWEET_FIELDS,
+    "user.fields": USER_FIELDS,
+    "media.fields": MEDIA_FIELDS,
+    expansions: EXPANSIONS,
+  });
+  return new Map(normalize(json).map((p) => [p.id, p]));
+}
+
 /** Fallback seed and topic reseed. Not an Owned Read — costs more per post. */
 export async function searchRecent(
   token: string,

@@ -81,7 +81,18 @@ export function childrenToNodes(
       generality: Math.min(c.generality, Math.max(0, parent.generality - 0.05)),
       depth: parent.depth + 1,
       source_post_ids: keepRealPosts(c.source_post_ids, posts),
-      has_children: c.has_children && parent.depth < 4,
+      /**
+       * Always true. The board is infinitely recursive by design — there is
+       * always a more specific question to ask, so no card is ever a dead end.
+       *
+       * Grok's own has_children signal is kept as a HINT (below) about whether
+       * it knows of real depth here, which drives the unread dot. That's the
+       * honest reading: "I don't know of more" is guidance, not a locked door.
+       * If you expand anyway and there genuinely is nothing, Grok says so in a
+       * node — which is a real answer, unlike an inert card.
+       */
+      has_children: true,
+      unread_depth: c.has_children,
       epistemic: c.epistemic,
       fork: fork === "deeper" ? undefined : fork,
       created_at: now,

@@ -13,8 +13,6 @@ import type { Board, BranchNode } from "./schema";
 export const CARD_W = 300;
 export const COL_GAP = 44;
 export const CARD_GAP = 26;
-/** padding inside the rounded track that sits behind a column */
-export const TRACK_PAD = 18;
 export const TOP_PAD = 88;
 export const LEFT_PAD = 56;
 

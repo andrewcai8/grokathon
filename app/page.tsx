@@ -103,12 +103,31 @@ export default function Home() {
           }}
         />
       ) : (
-        <div className="w-[228px] shrink-0 border-r border-black/[0.055] bg-[#f4f4f2]" />
+        <div
+          className="w-[248px] shrink-0"
+          style={{
+            background: "var(--gb-panel)",
+            borderRight: "1px solid var(--gb-line)",
+          }}
+        />
       )}
       <ZoomSurface />
       {board?.seed.snapshot ? (
-        <div className="pointer-events-none absolute right-4 top-4 rounded-full bg-white/80 px-3 py-1 text-[10px] uppercase tracking-[0.09em] text-neutral-400 backdrop-blur">
-          snapshot
+        <div
+          className="gb-label pointer-events-none absolute right-5 top-5 flex items-center gap-2 border px-2.5 py-[7px]"
+          style={{
+            borderColor: "var(--gb-line)",
+            color: "var(--gb-dim)",
+            background: "rgba(0,0,0,0.6)",
+            borderRadius: 2,
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          <span
+            className="h-[5px] w-[5px] rounded-full"
+            style={{ background: "var(--gb-faint)" }}
+          />
+          Snapshot
         </div>
       ) : null}
     </main>

@@ -111,16 +111,39 @@ function childSchema() {
   };
 }
 
-const SYSTEM = `You structure a person's X (Twitter) timeline into a nested knowledge tree.
+type Grounding = "corpus" | "search";
 
-Absolute rules:
-- The posts you are given are the ONLY ground truth. Never assert anything not supported by them.
-- Never invent a post ID. Only cite IDs present in the supplied corpus.
-- Label epistemic status honestly. If something is one account's claim, it is thin_evidence, not widely_shared. If accounts disagree, it is contested. Say so plainly.
+/**
+ * One prompt, two groundings.
+ *
+ * These were previously two independent prompt pairs, and they drifted: the
+ * corpus wording ("the posts you are given are the ONLY ground truth") leaked
+ * into the x_search path and told the model to disregard the search tool it had
+ * just been handed — it reported "no dissent found in corpus" without looking.
+ * Everything shared now lives in one place; only the grounding clause differs.
+ */
+const SHARED_RULES = `- Label epistemic status honestly. One account's claim is thin_evidence, not widely_shared. If credible accounts disagree, it is contested. Say so plainly.
 - Bodies are 2-3 sentences. This is a card on a canvas, not an article.
 - Titles must make sense read alone at a glance, with no body text visible.
 - Be specific. "Market reaction" is a bad title; "Rates repriced harder than equities" is a good one.
-- Do not flatten disagreement into false consensus. Surfacing dissent is the point.`;
+- Do not manufacture balance, and do not flatten real disagreement into consensus.`;
+
+const GROUNDING_RULES: Record<Grounding, string> = {
+  corpus: `The posts you are given are the ONLY ground truth. Never assert anything they do not support, and never cite an ID that is not in the supplied corpus.`,
+  search: `Ground truth is the posts you find with the x_search tool. Search thoroughly before concluding anything.
+- Cite only real posts you actually found. Every URL must be a permalink you saw in results, and every quote verbatim from that post. Never fabricate either.
+- Search first, conclude second. Do not report an absence of evidence until you have looked from more than one angle.`,
+};
+
+function systemFor(grounding: Grounding) {
+  return `You structure a person's X (Twitter) timeline into a nested knowledge tree.
+
+Absolute rules:
+- ${GROUNDING_RULES[grounding]}
+${SHARED_RULES}`;
+}
+
+const SYSTEM = systemFor("corpus");
 
 function postLine(p: XPost) {
   const m = p.metrics
@@ -204,17 +227,26 @@ ${posts.map(postLine).join("\n\n")}`;
   );
 }
 
-const FORK_INSTRUCTION: Record<Fork, string> = {
-  deeper: "Break this into its most specific, load-bearing sub-claims.",
+const FORK_INTENT: Record<Fork, string> = {
+  deeper: "the most specific, load-bearing sub-claims of this",
   counter:
-    "Surface ONLY the opposing frames, dissent, and contradicting evidence. If genuine dissent does not exist in the corpus, return a single node saying so honestly rather than manufacturing balance.",
+    "the strongest opposing frames, dissent and contradicting evidence — including from accounts a typical follower of this topic would never see",
   primary_only:
-    "Strip commentary and punditry. Prefer original posts, officials, first-hand accounts and documents.",
-  people: "Who is driving and amplifying this? One node per significant actor.",
-  media: "The images, video and memes in this story, and what each is arguing.",
+    "original sources only: the people directly involved, officials, first-hand accounts and documents. Exclude commentary and punditry",
+  people: "who is actually driving and amplifying this — one node per significant actor, citing their own posts",
+  media: "the images, video and memes in this story, and what each is arguing",
   falsifiers:
-    "What would change my mind? Name the specific missing evidence and the observations that would falsify the main claims.",
+    "what would change my mind: the specific missing evidence, and the observations that would falsify the main claims",
 };
+
+function forkInstruction(fork: Fork, grounding: Grounding) {
+  const verb = grounding === "search" ? "Search X for" : "From the corpus, surface";
+  const nothing =
+    grounding === "search"
+      ? "Only after searching from several angles, if there genuinely is nothing, say so plainly in one node."
+      : "If it genuinely is not present in the corpus, say so plainly in one node rather than inventing it.";
+  return `${verb} ${FORK_INTENT[fork]}.\n${nothing}`;
+}
 
 export async function expandNode(
   node: BranchNode,
@@ -248,7 +280,7 @@ title: ${node.title}
 body: ${node.body ?? "(none)"}
 
 FORK: ${fork}
-${FORK_INSTRUCTION[fork]}
+${forkInstruction(fork, "corpus")}
 
 Children must be strictly more specific than the parent. Do not restate the parent. Every claim that has evidence in the corpus must cite its post IDs.
 
@@ -266,29 +298,183 @@ ${posts.map(postLine).join("\n\n")}`;
     .slice(0, MAX_CHILDREN);
 }
 
-/**
- * Grok's x_search agent tool: searches X posts, profiles and threads natively
- * and returns citations. Lets us ground a claim in posts from OUTSIDE the
- * user's following graph — which is what makes the Counter fork actually work.
- * Responses API only. $5 per 1k calls.
- */
-export async function xSearch(
-  query: string,
-  opts: { fromDate?: string; toDate?: string; handles?: string[] } = {},
-): Promise<{ text: string; citations: string[] }> {
+// ---------------------------------------------------------------------------
+// x_search-backed expansion
+//
+// The corpus expand above can only cite posts that happened to cross the user's
+// timeline, which makes "show me the counters" only as good as who they follow.
+// Grok's x_search tool searches all of X — it fans out internally to keyword
+// search, semantic search and thread fetch — so a fork can bring back dissent
+// from accounts the user has never seen.
+//
+// Verified against the live API:
+//   - Responses API only (/v1/responses), not chat.completions
+//   - structured output works alongside tools, via text.format (NOT
+//     response_format, which is the chat.completions spelling)
+//   - citations arrive as annotations of type "url_citation" on the message
+//     content; there is no top-level `citations` field
+//   - unbounded it made 10 tool calls and took 36s. max_tool_calls: 3 brings
+//     that to ~19s, which is what makes it usable behind a skeleton.
+// ---------------------------------------------------------------------------
+
+
+
+
+
+const X_POST_URL = /^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]+)\/status\/(\d+)/;
+
+/** Turn an x.com permalink into a real XPost we can render as a citation chip. */
+function postFromUrl(url: string, quote: string): XPost | null {
+  const m = X_POST_URL.exec(url.trim());
+  if (!m) return null;
+  const [, handle, id] = m;
+  return {
+    id,
+    text: quote,
+    author: { id: `x_${handle}`, handle, name: handle },
+    created_at: new Date().toISOString(),
+    url: `https://x.com/${handle}/status/${id}`,
+  };
+}
+
+const XSEARCH_CHILD = {
+  type: "object",
+  properties: {
+    type: CHILD_PROPS.type,
+    title: CHILD_PROPS.title,
+    body: CHILD_PROPS.body,
+    priority: CHILD_PROPS.priority,
+    generality: CHILD_PROPS.generality,
+    has_children: CHILD_PROPS.has_children,
+    epistemic: CHILD_PROPS.epistemic,
+    evidence: {
+      type: "array",
+      description:
+        "The X posts that support this. Only posts you actually found via search — never fabricate a URL.",
+      items: {
+        type: "object",
+        properties: {
+          url: {
+            type: "string",
+            description: "Full permalink, https://x.com/<handle>/status/<id>",
+          },
+          quote: {
+            type: "string",
+            description: "Short verbatim excerpt from that post, under 200 chars.",
+          },
+        },
+        required: ["url", "quote"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: [
+    "type",
+    "title",
+    "body",
+    "priority",
+    "generality",
+    "has_children",
+    "epistemic",
+    "evidence",
+  ],
+  additionalProperties: false,
+} as const;
+
+interface XSearchChild {
+  type: GrokChild["type"];
+  title: string;
+  body: string;
+  priority: number;
+  generality: number;
+  has_children: boolean;
+  epistemic: GrokChild["epistemic"];
+  evidence: { url: string; quote: string }[];
+}
+
+export async function expandViaXSearch(
+  node: BranchNode,
+  fork: Fork,
+  ancestors: string[] = [],
+): Promise<{ children: GrokChild[]; posts: XPost[] }> {
+  const schema = {
+    type: "object",
+    properties: {
+      children: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_CHILDREN,
+        items: XSEARCH_CHILD,
+      },
+    },
+    required: ["children"],
+    additionalProperties: false,
+  };
+
+  const prompt = `${ancestors.length ? `CONTEXT: ${ancestors.join(" > ")}\n\n` : ""}NODE
+title: ${node.title}
+body: ${node.body ?? "(none)"}
+
+Search X and return AT MOST ${MAX_CHILDREN} children.
+
+${forkInstruction(fork, "search")}
+
+Search beyond any one bubble — prefer posts from accounts arguing this directly, including ones a typical follower of this topic would not see. Every child must cite the real posts you found, with a short verbatim quote from each. Never invent a URL or a quote. If the search genuinely turns up nothing, return one child saying so honestly.`;
+
   const res = await grok().responses.create({
     model: GROK_MODEL,
-    input: [{ role: "user", content: query }],
-    tools: [
-      {
-        type: "x_search",
-        ...(opts.handles?.length ? { allowed_x_handles: opts.handles.slice(0, 20) } : {}),
-        ...(opts.fromDate ? { from_date: opts.fromDate } : {}),
-        ...(opts.toDate ? { to_date: opts.toDate } : {}),
-      } as unknown as never,
+    reasoning_effort: REASONING_EFFORT,
+    // Unbounded this fans out to ~10 searches and takes 36s. Three is the floor:
+    // measured at 2, it exhausted its budget and returned "no genuine dissent
+    // found" for a topic that plainly had some. A tool budget that manufactures
+    // false negatives is worse than a slow one — the whole product rests on the
+    // absence of dissent meaning something.
+    max_tool_calls: 3,
+    input: [
+      { role: "system", content: systemFor("search") },
+      { role: "user", content: prompt },
     ],
-  });
+    tools: [{ type: "x_search" }],
+    text: {
+      format: { type: "json_schema", name: "xsearch_children", strict: true, schema },
+    },
+  } as unknown as Parameters<OpenAI["responses"]["create"]>[0]);
 
-  const r = res as unknown as { output_text?: string; citations?: string[] };
-  return { text: r.output_text ?? "", citations: r.citations ?? [] };
+  const text = (res as unknown as { output_text?: string }).output_text;
+  if (!text) throw new Error("x_search returned no content");
+
+  const parsed = JSON.parse(text) as { children: XSearchChild[] };
+  const posts: XPost[] = [];
+  const children: GrokChild[] = [];
+
+  for (const c of parsed.children.slice(0, MAX_CHILDREN)) {
+    const ids: string[] = [];
+    for (const ev of c.evidence ?? []) {
+      const post = postFromUrl(ev.url, ev.quote);
+      // a citation we can't resolve to a real permalink is dropped, not shown
+      if (!post) continue;
+      if (!posts.some((p) => p.id === post.id)) posts.push(post);
+      ids.push(post.id);
+    }
+    children.push({
+      type: c.type,
+      title: c.title,
+      body: c.body,
+      priority: c.priority,
+      generality: c.generality,
+      has_children: c.has_children,
+      epistemic: c.epistemic,
+      source_post_ids: ids,
+    });
+  }
+
+  return { children, posts };
 }
+
+/** Which forks reach outside the user's timeline. */
+export const XSEARCH_FORKS: ReadonlySet<Fork> = new Set<Fork>([
+  "counter",
+  "primary_only",
+  "falsifiers",
+  "people",
+]);

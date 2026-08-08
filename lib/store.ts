@@ -13,6 +13,8 @@ interface BoardState {
   pending: Set<string>;
   hoveredId: string | null;
   selectedId: string | null;
+  /** last expand failure per node — a silent failure looks identical to a dead card */
+  errors: Record<string, string>;
 
   zoom: number;
   pan: { x: number; y: number };
@@ -30,6 +32,7 @@ interface BoardState {
   expand: (id: string) => void;
   collapse: (id: string) => void;
   setPending: (id: string, on: boolean) => void;
+  setError: (id: string, message: string | null) => void;
 
   setHovered: (id: string | null) => void;
   select: (id: string) => void;
@@ -99,6 +102,7 @@ export const useBoard = create<BoardState>((set, get) => ({
   pending: new Set<string>(),
   hoveredId: null,
   selectedId: null,
+  errors: {},
 
   zoom: DEFAULT_ZOOM,
   pan: { x: 0, y: 0 },
@@ -171,6 +175,13 @@ export const useBoard = create<BoardState>((set, get) => ({
     // relayout immediately: the skeleton column has to appear on the same
     // frame as the click, otherwise the click feels like it did nothing
     set({ pending, layout: relayout(board, expanded, pending) });
+  },
+
+  setError: (id, message) => {
+    const errors = { ...get().errors };
+    if (message) errors[id] = message;
+    else delete errors[id];
+    set({ errors });
   },
 
   setHovered: (hoveredId) => set({ hoveredId }),

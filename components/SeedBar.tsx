@@ -14,6 +14,9 @@ interface Me {
  * "That's my real feed" is the second-biggest beat in the demo (doc §0), so the
  * provenance of the board has to be visible and honest: connected or not,
  * live or snapshot. Never let the audience wonder which they're looking at.
+ *
+ * Reads as a status block — source, link state, actions — because that framing
+ * makes the honesty structural rather than a disclaimer.
  */
 export function SeedBar({
   board,
@@ -56,56 +59,93 @@ export function SeedBar({
 
   const live = board && !board.seed.snapshot;
 
+  const action =
+    "gb-label w-full border px-2.5 py-[9px] text-left transition-colors disabled:opacity-40";
+  const actionStyle = {
+    borderColor: "var(--gb-line)",
+    color: "var(--gb-dim)",
+    borderRadius: 2,
+  };
+  const hoverOn = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (e.currentTarget.disabled) return;
+    e.currentTarget.style.borderColor = "var(--gb-line-max)";
+    e.currentTarget.style.color = "var(--gb-text)";
+  };
+  const hoverOff = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.currentTarget.style.borderColor = "var(--gb-line)";
+    e.currentTarget.style.color = "var(--gb-dim)";
+  };
+
   return (
-    <div className="border-t border-black/[0.055] px-5 py-4">
+    <div className="px-5 py-4" style={{ borderTop: "1px solid var(--gb-line)" }}>
       {me?.connected ? (
-        <div className="mb-2.5 flex items-center gap-1.5">
-          <span className="h-[6px] w-[6px] rounded-full bg-[#22c55e]" />
-          <span className="text-[11px] font-medium text-neutral-700">
-            @{me.handle}
-          </span>
-          <span className="text-[11px] text-neutral-400">
-            {live ? "· live" : "· snapshot"}
+        <div className="gb-label mb-3 flex items-center gap-2">
+          <span
+            className="h-[5px] w-[5px] rounded-full"
+            style={{
+              background: live ? "var(--gb-live)" : "var(--gb-faint)",
+              boxShadow: live ? "0 0 8px var(--gb-live)" : "none",
+            }}
+          />
+          <span style={{ color: "var(--gb-text)" }}>{me.handle}</span>
+          <span className="h-px flex-1" style={{ background: "var(--gb-line)" }} />
+          <span style={{ color: live ? "var(--gb-live)" : "var(--gb-faint)" }}>
+            {live ? "Live" : "Snapshot"}
           </span>
         </div>
       ) : me?.canConnect ? (
         <a
           href="/api/auth/login"
-          className="mb-2.5 block rounded-md bg-neutral-900 px-3 py-2 text-center text-[11.5px] font-medium text-white transition-opacity hover:opacity-85"
+          className="gb-label mb-3 block px-3 py-[10px] text-center transition-opacity hover:opacity-80"
+          style={{ background: "var(--gb-text)", color: "#000", borderRadius: 2 }}
         >
           Connect X
         </a>
       ) : (
-        <div className="mb-2.5 text-[11px] text-neutral-400">
+        <div className="gb-label mb-3" style={{ color: "var(--gb-faint)" }}>
           X credentials not configured
         </div>
       )}
 
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1.5">
         {me?.connected ? (
           <button
             onClick={() => reseed("/api/seed?live=1", "live")}
             disabled={Boolean(busy)}
-            className="rounded-md px-2 py-1.5 text-left text-[11.5px] text-neutral-600 transition-colors hover:bg-black/[0.045] disabled:opacity-45"
+            className={action}
+            style={actionStyle}
+            onMouseEnter={hoverOn}
+            onMouseLeave={hoverOff}
           >
-            {busy === "live" ? "Reading your timeline…" : "🔄 Reseed from my timeline"}
+            {busy === "live" ? "Reading timeline…" : "↻ Reseed from timeline"}
           </button>
         ) : null}
         <button
           onClick={() => reseed("/api/seed?snapshot=latest", "snap")}
           disabled={Boolean(busy)}
-          className="rounded-md px-2 py-1.5 text-left text-[11.5px] text-neutral-600 transition-colors hover:bg-black/[0.045] disabled:opacity-45"
+          className={action}
+          style={actionStyle}
+          onMouseEnter={hoverOn}
+          onMouseLeave={hoverOff}
         >
-          {busy === "snap" ? "Loading…" : "💾 Load snapshot"}
+          {busy === "snap" ? "Loading…" : "◧ Load snapshot"}
         </button>
       </div>
 
       {error ? (
-        <div className="mt-2 text-[10.5px] leading-tight text-amber-700">{error}</div>
+        <div
+          className="gb-label mt-3 leading-[1.5]"
+          style={{ color: "var(--gb-warn)", letterSpacing: "0.06em" }}
+        >
+          {error}
+        </div>
       ) : null}
       {me && !me.grok ? (
-        <div className="mt-2 text-[10.5px] leading-tight text-amber-700">
-          XAI_API_KEY not set — structure is fixtures only
+        <div
+          className="gb-label mt-3 leading-[1.5]"
+          style={{ color: "var(--gb-warn)", letterSpacing: "0.06em" }}
+        >
+          XAI_API_KEY not set — fixtures only
         </div>
       ) : null}
     </div>

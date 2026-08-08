@@ -14,7 +14,7 @@ import type { SkeletonBox } from "@/lib/layout";
 export function SkeletonCard({ box, index }: { box: SkeletonBox; index: number }) {
   return (
     <div
-      className="gb-skel absolute left-0 top-0 rounded-[10px] bg-white px-4 py-4"
+      className="gb-skel absolute left-0 top-0 px-4 py-4"
       style={{
         transform: `translate3d(${box.x}px, ${box.y}px, 0)`,
         width: box.w,
@@ -43,8 +43,8 @@ export function SkeletonCard({ box, index }: { box: SkeletonBox; index: number }
 
       {/* where the citation chips will land */}
       <div className="mt-4 flex items-center gap-1.5">
-        <div className="gb-skel-line h-[14px] w-[52px] rounded-full" />
-        <div className="gb-skel-line h-[14px] w-[74px] rounded-full" />
+        <div className="gb-skel-line h-[15px] w-[52px] rounded-[2px]" />
+        <div className="gb-skel-line h-[15px] w-[74px] rounded-[2px]" />
       </div>
     </div>
   );

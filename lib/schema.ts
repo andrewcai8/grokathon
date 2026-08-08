@@ -39,6 +39,12 @@ export const XPostSchema = z.object({
   conversation_id: z.string().optional(),
   /** quote / reply / retweet parents, for thread expansion */
   referenced_post_ids: z.array(z.string()).optional(),
+  /**
+   * True when this post came from Grok's x_search and we could NOT confirm it
+   * exists via the X API. The text is then Grok's account of the post, not the
+   * post. Rendered differently, never silently passed off as verified.
+   */
+  unverified: z.boolean().optional(),
 });
 export type XPost = z.infer<typeof XPostSchema>;
 
@@ -175,10 +181,3 @@ export const GrokClusterSchema = z.object({
   topics: z.array(GrokTopicSchema).min(3).max(12),
 });
 export type GrokCluster = z.infer<typeof GrokClusterSchema>;
-
-export const GrokVisionSchema = z.object({
-  depicts: z.string(),
-  claim: z.string().nullable(),
-  suggested_children: z.array(GrokChildSchema).max(4),
-});
-export type GrokVision = z.infer<typeof GrokVisionSchema>;

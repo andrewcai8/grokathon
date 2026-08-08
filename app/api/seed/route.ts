@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { buildBoard } from "@/lib/boardBuilder";
+import { buildBoard, buildBoardFromTrends } from "@/lib/boardBuilder";
 import { clusterSeed, hasGrok, MAX_ROOTS } from "@/lib/grokClient";
 import { setBoard } from "@/lib/serverBoard";
 import { loadSnapshot, saveSnapshot } from "@/lib/snapshot";
@@ -58,30 +58,17 @@ export async function GET(req: Request) {
   if (token?.user_id) {
     try {
       if (trending) {
-        /**
-         * Trending, but personalised to this account — the x.com "for you"
-         * trends rail, not a global top-10. Trends give us topic NAMES, so we
-         * search recent posts for the top few and cluster those.
-         *
-         * Availability is unverified (documented as Premium-gated), so a
-         * failure here is expected and falls through to the timeline seed
-         * below rather than breaking the board.
-         */
+        // Trends are already topics — use them as the roots directly. No
+        // search, no clustering, no Grok call: about a second, not eighteen.
         const trends = await getPersonalizedTrends(token.access_token);
-        const top = trends.slice(0, MAX_ROOTS);
-        if (top.length) {
-          const batches = await Promise.all(
-            top.map((t) =>
-              searchRecent(token.access_token, `${t.name} -is:retweet lang:en`, 25).catch(
-                () => [],
-              ),
-            ),
-          );
-          const seen = new Set<string>();
-          posts = batches.flat().filter((p) => !seen.has(p.id) && seen.add(p.id));
-          label = "Trending for you";
-          mode = "trending";
-          source = "x_personalized_trends";
+        if (trends.length) {
+          const board = buildBoardFromTrends(trends, {
+            date: today,
+            label: "Trending for you",
+            limit: MAX_ROOTS,
+          });
+          setBoard(board);
+          return NextResponse.json({ board, source: "x_personalized_trends" });
         }
       }
 

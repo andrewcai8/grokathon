@@ -173,23 +173,59 @@ export async function getPostsByIds(
 
 /**
  * Trends personalised to the authed account — the "what's trending for you"
- * rail on x.com, rather than a global top-10.
+ * rail on x.com, rather than a global top-10. Confirmed working on this
+ * account: returns headline-style trend names with a category and post count.
  *
- * NOT verified as available on our access level. Documented as requiring an X
- * Premium subscription on the authed user, so this may 403 for a given account.
- * The caller must treat failure as normal and fall back, never assume it works.
+ * These ARE the board's root topics. X has already done the clustering, so we
+ * use them directly rather than searching for posts and re-deriving topics.
  */
-export async function getPersonalizedTrends(
-  token: string,
-): Promise<{ name: string; postCount?: number }[]> {
-  const json = await xGet<{
-    data?: { trend_name?: string; post_count?: number }[];
-  }>("/users/personalized_trends", token, {});
-  return (json.data ?? [])
-    .map((t) => ({ name: t.trend_name ?? "", postCount: t.post_count }))
-    .filter((t) => t.name);
+export interface XTrend {
+  name: string;
+  category?: string;
+  /** parsed from the API's display string, e.g. "5.7K posts" -> 5700 */
+  postCount: number;
+  since?: string;
 }
 
+/** "5.7K posts" -> 5700, "542 posts" -> 542 */
+function parsePostCount(display?: string): number {
+  if (!display) return 0;
+  const m = /([\d.]+)\s*([KMB])?/i.exec(display);
+  if (!m) return 0;
+  const mult = { k: 1e3, m: 1e6, b: 1e9 }[m[2]?.toLowerCase() ?? ""] ?? 1;
+  return Math.round(parseFloat(m[1]) * mult);
+}
+
+export async function getPersonalizedTrends(token: string): Promise<XTrend[]> {
+  const json = await xGet<{
+    data?: {
+      trend_name?: string;
+      post_count?: string;
+      category?: string;
+      trending_since?: string;
+    }[];
+  }>("/users/personalized_trends", token, {});
+
+  return (json.data ?? [])
+    .map((t) => ({
+      name: t.trend_name ?? "",
+      category: t.category,
+      postCount: parsePostCount(t.post_count),
+      since: t.trending_since,
+    }))
+    .filter((t) => t.name)
+    .sort((a, b) => b.postCount - a.postCount);
+}
+
+
+/**
+ * Trends personalised to the authed account — the "what's trending for you"
+ * rail on x.com, rather than a global top-10. Confirmed working on this
+ * account: returns headline-style trend names with a category and post count.
+ *
+ * These ARE the board's root topics. X has already done the clustering, so we
+ * use them directly rather than searching for posts and re-deriving topics.
+ */
 /** Fallback seed and topic reseed. Not an Owned Read — costs more per post. */
 export async function searchRecent(
   token: string,

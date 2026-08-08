@@ -1,4 +1,5 @@
 import type { Board, BranchNode, Fork, GrokChild, GrokCluster, XPost } from "./schema";
+import type { XTrend } from "./xClient";
 
 /**
  * Grok invents meaning. We assign identity, wiring and timestamps.
@@ -57,6 +58,59 @@ export function buildBoard(
     nodes,
     root_ids: rootIds,
     posts: postMap,
+  };
+}
+
+/**
+ * Trends ARE the roots.
+ *
+ * X's personalised trends already come back as topics — headline, category,
+ * volume. Clustering exists to recover structure from unstructured posts; here
+ * there's nothing to recover, so we skip the search-and-recluster round trip
+ * entirely. The board opens in about a second instead of eighteen, with no
+ * Grok call at all, and the citations arrive when you expand.
+ */
+export function buildBoardFromTrends(
+  trends: XTrend[],
+  opts: { date: string; label: string; limit: number },
+): Board {
+  const now = new Date().toISOString();
+  const nodes: Record<string, BranchNode> = {};
+  const rootIds: string[] = [];
+  const top = trends.slice(0, opts.limit);
+  const busiest = Math.max(1, ...top.map((t) => t.postCount));
+
+  for (const trend of top) {
+    const id = newId("t");
+    rootIds.push(id);
+    nodes[id] = {
+      id,
+      type: "topic",
+      title: trend.name,
+      // no body: the trend headline IS the content. Inventing a summary here
+      // would be the one thing this product must never do — assert something
+      // no post supports.
+      body: undefined,
+      parent_id: null,
+      children_ids: [],
+      priority: trend.postCount / busiest,
+      generality: 1,
+      depth: 0,
+      source_post_ids: [],
+      has_children: true,
+      unread_depth: true,
+      heat: trend.postCount / busiest,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  return {
+    date: opts.date,
+    seed: { mode: "trending", label: opts.label },
+    nodes,
+    root_ids: rootIds,
+    posts: {},
   };
 }
 

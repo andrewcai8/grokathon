@@ -158,7 +158,12 @@ export async function POST(req: Request) {
     // Forks that are about what OTHER people think go to x_search, so they can
     // cite accounts the user doesn't follow. "deeper" stays on the timeline
     // corpus: it's about this story as it reached you, and it's ~7s faster.
-    const useXSearch = XSEARCH_FORKS.has(fork) && hasGrok();
+    //
+    // But a trending board's roots are headlines with no posts behind them at
+    // all, so there is no corpus to reason from. Anything with an empty corpus
+    // must search, or we'd be asking Grok to expand on nothing.
+    const corpus = relevantPosts(board, nodeId);
+    const useXSearch = (XSEARCH_FORKS.has(fork) || corpus.length === 0) && hasGrok();
 
     let raw;
     let newPosts: Record<string, XPost> = {};
@@ -167,7 +172,7 @@ export async function POST(req: Request) {
       raw = out.children;
       newPosts = await verifyCitations(out.posts);
     } else {
-      raw = await expandNode(node, fork, relevantPosts(board, nodeId), ancestors);
+      raw = await expandNode(node, fork, corpus, ancestors);
     }
 
     const postsForCitations = { ...board.posts, ...newPosts };

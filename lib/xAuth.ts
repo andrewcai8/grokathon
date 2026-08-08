@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { cookies } from "next/headers";
 
 /**
@@ -111,7 +113,37 @@ export function refresh(refreshToken: string) {
 
 // ---- cookie plumbing -------------------------------------------------------
 
+/**
+ * Mirror the token to disk.
+ *
+ * The cookie is httpOnly and per-browser, so anything running server-side
+ * without a request from that browser — background prefetch, a script, a
+ * scheduled warm-up — has no way to authenticate. This is the token the user
+ * already granted, written to a gitignored file on their own machine, so it
+ * grants nothing new. It is plaintext: fine for a local single-user app, not
+ * something to carry into anything shared.
+ */
+const TOKEN_FILE = path.join(process.cwd(), ".auth", "x-token.json");
+
+async function mirrorToDisk(token: XToken) {
+  try {
+    await mkdir(path.dirname(TOKEN_FILE), { recursive: true });
+    await writeFile(TOKEN_FILE, JSON.stringify(token, null, 2));
+  } catch (err) {
+    console.warn("[xAuth] could not mirror token to disk:", err);
+  }
+}
+
+async function readFromDisk(): Promise<XToken | null> {
+  try {
+    return JSON.parse(await readFile(TOKEN_FILE, "utf8")) as XToken;
+  } catch {
+    return null;
+  }
+}
+
 export async function storeToken(token: XToken) {
+  await mirrorToDisk(token);
   const jar = await cookies();
   jar.set(COOKIE, JSON.stringify(token), {
     httpOnly: true,
@@ -123,14 +155,14 @@ export async function storeToken(token: XToken) {
 }
 
 export async function readToken(): Promise<XToken | null> {
-  const jar = await cookies();
-  const raw = jar.get(COOKIE)?.value;
-  if (!raw) return null;
   try {
-    return JSON.parse(raw) as XToken;
+    const jar = await cookies();
+    const raw = jar.get(COOKIE)?.value;
+    if (raw) return JSON.parse(raw) as XToken;
   } catch {
-    return null;
+    /* no request context (background job) — fall through to disk */
   }
+  return readFromDisk();
 }
 
 /** Returns a live access token, refreshing if it's within 5 minutes of expiry. */
@@ -148,7 +180,12 @@ export async function activeToken(): Promise<XToken | null> {
       user_id: token.user_id,
       handle: token.handle,
     };
-    await storeToken(merged);
+    await mirrorToDisk(merged);
+    try {
+      await storeToken(merged);
+    } catch {
+      /* no request context to set a cookie on; disk copy is enough */
+    }
     return merged;
   } catch {
     return null;

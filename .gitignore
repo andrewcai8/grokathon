@@ -42,3 +42,6 @@ next-env.d.ts
 
 # real timeline data captured for the demo safety net
 .snapshots/
+
+# OAuth token mirrored for server-side/background use
+.auth/

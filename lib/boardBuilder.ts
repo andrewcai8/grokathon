@@ -180,6 +180,31 @@ export function childrenToNodes(
 }
 
 /**
+ * Everything the board has ALREADY said.
+ *
+ * Depth has to pay for itself. Someone expands a node because they're curious
+ * and want to learn more — if the children re-cite the same posts and restate
+ * the same ideas in narrower words, curiosity gets punished and the tree is
+ * just a thesaurus. So we tell Grok what's already on the board and, more
+ * importantly, remove those posts from the corpus it can draw on. Novelty then
+ * isn't something the model has to remember to do; it's the only thing it can
+ * do.
+ */
+export function coveredGround(
+  board: Board,
+  excludeNodeId?: string,
+): { postIds: Set<string>; titles: string[] } {
+  const postIds = new Set<string>();
+  const titles: string[] = [];
+  for (const n of Object.values(board.nodes)) {
+    if (n.id === excludeNodeId) continue;
+    for (const id of n.source_post_ids) postIds.add(id);
+    titles.push(n.title);
+  }
+  return { postIds, titles };
+}
+
+/**
  * ONLY what this node and its ancestors actually cite — no top-up.
  *
  * This is the grounding test: does this node have evidence behind it, or is it

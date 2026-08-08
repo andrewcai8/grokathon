@@ -190,14 +190,14 @@ async function structured<T>(
 }
 
 /** Seed corpus -> root topics for the day. */
-export async function clusterSeed(posts: XPost[]) {
+export async function clusterSeed(posts: XPost[], slots = MAX_ROOTS) {
   const schema = {
     type: "object",
     properties: {
       topics: {
         type: "array",
         minItems: 1,
-        maxItems: MAX_ROOTS,
+        maxItems: Math.max(1, slots),
         items: {
           type: "object",
           properties: {
@@ -224,9 +224,9 @@ export async function clusterSeed(posts: XPost[]) {
     additionalProperties: false,
   };
 
-  const content = `Here are ${posts.length} posts from my X timeline today. Give me THE ${MAX_ROOTS} stories that actually define my day.
+  const content = `Here are ${posts.length} posts from my X timeline today. Give me THE ${slots} stories that actually define my day.
 
-This is a hard cap, not a target — pick the ${MAX_ROOTS} that matter most and let the rest go. Rank by how much they matter to me, using engagement and how much of the timeline they occupy. Do not add an "Other" bucket; with only ${MAX_ROOTS} slots, spending one on noise wastes it.
+This is a hard cap, not a target — pick the ${slots} that matter most and let the rest go. Rank by how much they matter to me, using engagement and how much of the timeline they occupy. Do not add an "Other" bucket; with only ${slots} slots, spending one on noise wastes it.
 
 POSTS:
 ${posts.map(postLine).join("\n\n")}`;
@@ -236,7 +236,7 @@ ${posts.map(postLine).join("\n\n")}`;
   );
   // schema caps it, but parsing stays tolerant — trim rather than throw
   return {
-    topics: [...out.topics].sort((a, b) => b.priority - a.priority).slice(0, MAX_ROOTS),
+    topics: [...out.topics].sort((a, b) => b.priority - a.priority).slice(0, slots),
   };
 }
 
@@ -266,6 +266,8 @@ export async function expandNode(
   fork: Fork,
   posts: XPost[],
   ancestors: string[] = [],
+  /** titles already on the board — children must not restate any of them */
+  covered: string[] = [],
 ): Promise<GrokChild[]> {
   const schema = {
     type: "object",
@@ -295,7 +297,10 @@ body: ${node.body ?? "(none)"}
 FORK: ${fork}
 ${forkInstruction(fork, "corpus")}
 
-Children must be strictly more specific than the parent. Do not restate the parent. Every claim that has evidence in the corpus must cite its post IDs.
+Children must be strictly more specific than the parent, and every one must carry information that is NOT already on the board. The person expanding this is curious and wants to learn something they don't already know — a child that rephrases the parent, or repeats a card they can already see, wastes the click.
+
+${covered.length ? `ALREADY ON THE BOARD — do not restate any of these, and do not make a child that is merely a narrower wording of one:\n${covered.slice(0, 40).map((t) => `- ${t}`).join("\n")}\n` : ""}
+Every claim that has evidence in the corpus must cite its post IDs. The posts below have been filtered to ones not yet cited anywhere on this board, so prefer them — that is where the new information is.
 
 AVAILABLE POSTS:
 ${posts.map(postLine).join("\n\n")}`;
@@ -490,6 +495,8 @@ export async function expandViaXSearch(
   node: BranchNode,
   fork: Fork,
   ancestors: string[] = [],
+  /** titles already on the board — this path repeated facts without it */
+  covered: string[] = [],
 ): Promise<{ children: GrokChild[]; posts: XPost[]; summary?: string }> {
   const schema = {
     type: "object",
@@ -517,6 +524,8 @@ body: ${node.body ?? "(none)"}
 ${node.body ? "" : "This node is a trending headline with no posts attached to it yet. The search IS how it becomes grounded.\n\n"}SEARCH FIRST. Call x_search before you answer — do not describe what you are about to do, and do not write your answer from prior knowledge. Everything below must come from posts the search actually returned.
 
 Then return AT MOST ${MAX_CHILDREN} children, plus a summary of what this story is.
+
+${covered.length ? `ALREADY ON THE BOARD — the user has read all of these. Do NOT restate any of them, and do not return a narrower rewording of one. Every child must teach something none of these say:\n${covered.slice(0, 40).map((t) => `- ${t}`).join("\n")}\n` : ""}
 
 ${forkInstruction(fork, "search")}
 

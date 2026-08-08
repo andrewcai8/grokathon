@@ -10,7 +10,7 @@ import {
   searchRecent,
 } from "@/lib/xClient";
 import { FIXTURE_BOARD } from "@/lib/fixtures";
-import type { XPost } from "@/lib/schema";
+import type { Board, XPost } from "@/lib/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +27,6 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const wantSnapshot = url.searchParams.get("snapshot");
   const live = url.searchParams.get("live") === "1";
-  const trending = url.searchParams.get("trending") === "1";
   const query = url.searchParams.get("q");
 
   if (wantSnapshot) {
@@ -40,7 +39,7 @@ export async function GET(req: Request) {
 
   // default to the rehearsed snapshot unless explicitly asked for a live read —
   // a demo should never gamble on the venue wifi
-  if (!live && !query && !trending) {
+  if (!live && !query) {
     const snap = await loadSnapshot("latest");
     if (snap) {
       setBoard(snap);
@@ -53,35 +52,42 @@ export async function GET(req: Request) {
   let label = "Your day on X";
   let mode: "my_day" | "search" | "trending" = "my_day";
   let source = "fixtures";
+  /** trending roots, merged in front of the clustered timeline topics */
+  let trendBoard: Board | null = null;
 
   const token = await activeToken();
   if (token?.user_id) {
     try {
-      if (trending) {
-        // Trends are already topics — use them as the roots directly. No
-        // search, no clustering, no Grok call: about a second, not eighteen.
-        const trends = await getPersonalizedTrends(token.access_token);
-        if (trends.length) {
-          const board = buildBoardFromTrends(trends, {
-            date: today,
-            label: "Trending for you",
-            limit: MAX_ROOTS,
-          });
-          setBoard(board);
-          return NextResponse.json({ board, source: "x_personalized_trends" });
-        }
-      }
-
-      if (!posts.length && query) {
+      if (query) {
         posts = await searchRecent(token.access_token, query, 60);
         label = query;
         mode = "search";
         source = "x_search_recent";
-      } else if (!posts.length) {
-        // trending unavailable or empty — the timeline seed always works
+      } else {
+        /**
+         * One seed, not two.
+         *
+         * Trending and timeline were separate buttons, which made the user
+         * choose between "what the world is talking about" and "what my feed
+         * is talking about" before seeing either. Your day is both. Trends
+         * come first because they're free and instant and they're legible
+         * news; the timeline fills any remaining slots with what your own
+         * follow graph is actually discussing.
+         */
+        const trends = await getPersonalizedTrends(token.access_token).catch(
+          () => [],
+        );
+        const trendRoots = Math.min(trends.length, MAX_ROOTS - 1);
+        if (trendRoots > 0) {
+          trendBoard = buildBoardFromTrends(trends, {
+            date: today,
+            label: "Your day on X",
+            limit: trendRoots,
+          });
+        }
         posts = await getHomeTimeline(token.access_token, token.user_id, 100);
         label = token.handle ? `@${token.handle}'s day` : "Your day on X";
-        source = "x_home_timeline";
+        source = trendRoots > 0 ? "trends+timeline" : "x_home_timeline";
       }
     } catch (err) {
       console.error("[seed] X read failed:", err);
@@ -99,8 +105,20 @@ export async function GET(req: Request) {
   }
 
   try {
-    const cluster = await clusterSeed(posts);
-    const board = buildBoard(cluster, posts, { date: today, label, mode });
+    // leave room for the trending roots so the board still holds MAX_ROOTS
+    const slots = MAX_ROOTS - (trendBoard?.root_ids.length ?? 0);
+    const cluster = await clusterSeed(posts, Math.max(1, slots));
+    let board = buildBoard(cluster, posts, { date: today, label, mode });
+
+    if (trendBoard) {
+      board = {
+        ...board,
+        seed: { ...board.seed, label: "Your day on X" },
+        nodes: { ...trendBoard.nodes, ...board.nodes },
+        // trends first: they're the legible headline news
+        root_ids: [...trendBoard.root_ids, ...board.root_ids].slice(0, MAX_ROOTS),
+      };
+    }
     setBoard(board);
     // every successful live read becomes the next demo safety net
     if (source === "x_home_timeline") await saveSnapshot(board, "latest");

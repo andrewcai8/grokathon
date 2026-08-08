@@ -10,6 +10,7 @@ import {
   ancestorTitles,
   childrenToNodes,
   citedPosts,
+  coveredGround,
   relevantPosts,
   rollUpCitations,
 } from "@/lib/boardBuilder";
@@ -184,22 +185,59 @@ export async function POST(req: Request) {
      * x_search is kept for the forks that are open-ended discovery ("find the
      * strongest opposing argument"), which no keyword query can express.
      */
+    // What the board has already said. Posts already cited anywhere are
+    // removed from the corpus outright, so a deeper card cannot be built from
+    // evidence the user has already read.
+    const covered = coveredGround(board, nodeId);
+    const isNew = (p: XPost) => !covered.postIds.has(p.id);
+
     const grounded = citedPosts(board, nodeId).length > 0;
-    let corpus = grounded ? relevantPosts(board, nodeId) : [];
+    let corpus = grounded ? relevantPosts(board, nodeId).filter(isNew) : [];
     let groundedNow = false;
 
-    if (!grounded && !XSEARCH_FORKS.has(fork)) {
+    /**
+     * Fetch fresh evidence when the novel corpus runs dry.
+     *
+     * Novelty plus a finite timeline corpus hits exhaustion within about two
+     * levels — depth 2 was already answering "no detail in remaining corpus".
+     * But the board is meant to recurse indefinitely, and the reason someone
+     * is three levels down is that they want MORE, not a note saying we ran
+     * out. So when there's little unseen evidence left we go and search X for
+     * this specific node, which is naturally a narrower query the deeper you
+     * are, and returns posts the board has never shown.
+     */
+    /**
+     * Depth always fetches fresh evidence.
+     *
+     * relevantPosts() pads the corpus with the rest of the timeline, so a deep
+     * node LOOKS well supplied while none of those posts are about it — Grok
+     * then correctly answers "no corpus evidence for <specific sub-claim>",
+     * which reads as a dead end. Sizing the corpus was the wrong test.
+     *
+     * The honest rule matches what the levels mean: a ROOT is your day, and
+     * the timeline is the right evidence for it. Anything DEEPER is the user
+     * saying "I want to know more about this specific thing", and the answer
+     * to that lives on X, not in the hundred posts that happened to cross
+     * their feed. So depth >= 1 always goes and gets new posts.
+     */
+    const MIN_NOVEL_CORPUS = 5;
+    const wantsFresh = node.depth >= 1 || corpus.length < MIN_NOVEL_CORPUS;
+    if (wantsFresh && !XSEARCH_FORKS.has(fork)) {
       const tok = await activeToken();
       if (tok?.access_token) {
         try {
           const q = await searchQueryFor(node.title);
-          const found = await searchRecent(tok.access_token, q, 40);
+          const found = (await searchRecent(tok.access_token, q, 40)).filter(isNew);
           if (found.length) {
-            corpus = found;
+            // for a deep node the fresh posts ARE the evidence; padding with
+            // unrelated timeline posts is what produced the dead ends
+            corpus = node.depth >= 1 ? found : [...corpus, ...found];
             newPosts = Object.fromEntries(found.map((p) => [p.id, p]));
             groundedNow = true;
-            console.log("[expand] grounded %s via X search: %s -> %d posts",
-              nodeId, q, found.length);
+            console.log(
+              "[expand] refreshed %s via X search: %s -> %d new posts (corpus %d)",
+              nodeId, q, found.length, corpus.length,
+            );
           }
         } catch (err) {
           console.warn("[expand] X grounding failed, falling back:", err);
@@ -209,20 +247,53 @@ export async function POST(req: Request) {
 
     // fall back to x_search when the X API couldn't ground it, or for the
     // discovery forks
+    // Fall back to x_search whenever we're left with too little NEW evidence
+    // to say anything worth reading — not only when there's literally none.
+    // Expanding on two leftover posts produces "no corpus evidence for X",
+    // which is a dead end dressed as an answer.
     const useXSearch =
-      hasGrok() && (XSEARCH_FORKS.has(fork) || (!grounded && !groundedNow));
+      hasGrok() &&
+      (XSEARCH_FORKS.has(fork) || (wantsFresh && !groundedNow));
 
     if (useXSearch) {
-      const out = await expandViaXSearch(node, fork, ancestors);
+      const out = await expandViaXSearch(node, fork, ancestors, covered.titles);
       raw = out.children;
-      newPosts = { ...newPosts, ...(await verifyCitations(out.posts)) };
+      const verified = await verifyCitations(out.posts.filter(isNew));
+      newPosts = { ...newPosts, ...verified };
       summary = out.summary;
     } else {
-      raw = await expandNode(node, fork, corpus, ancestors);
+      raw = await expandNode(node, fork, corpus, ancestors, covered.titles);
     }
 
     const postsForCitations = { ...board.posts, ...newPosts };
-    const children = childrenToNodes(node, raw, postsForCitations, fork);
+    let children = childrenToNodes(node, raw, postsForCitations, fork);
+
+    /**
+     * Drop claims left with no evidence.
+     *
+     * verifyCitations deletes fabricated posts, but the claim they "supported"
+     * survived with an empty citation list — rendering as merely uncited,
+     * indistinguishable from a properly grounded sibling. We watched Grok
+     * fabricate 6/6 URLs in one call, so this is the difference between the
+     * check working and the check looking like it worked.
+     *
+     * If EVERY child is uncited we keep one: that's the honest "nothing found
+     * here" answer, which is a real result rather than a fabrication.
+     */
+    const cited = children.filter((c) => c.source_post_ids.length > 0);
+    if (cited.length > 0 && cited.length < children.length) {
+      console.warn(
+        "[expand] dropped %d/%d claims left with no surviving evidence",
+        children.length - cited.length,
+        children.length,
+      );
+      children = cited;
+    } else if (cited.length === 0) {
+      children = children.slice(0, 1).map((c) => ({
+        ...c,
+        epistemic: "thin_evidence" as const,
+      }));
+    }
 
     // only patch the server graph when it actually owns this node
     if (serverBoard?.nodes[nodeId]) patchBoard((b) => {

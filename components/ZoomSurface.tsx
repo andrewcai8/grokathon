@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useBoard } from "@/lib/store";
 import { lodFor, clamp, frameRect } from "@/lib/lod";
-import { CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
+import { CARD_GAP, CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
 import { BranchCard } from "./BranchCard";
 import { GhostColumn } from "./GhostColumn";
 import { SkeletonCard } from "./SkeletonCard";
+import { MoreRootsCard } from "./MoreRootsCard";
 import type { Board } from "@/lib/schema";
 
 /** Titles from root down to (not including) this node, for prompt context. */
@@ -359,6 +360,12 @@ export function ZoomSurface() {
   // every card previews, because every card can be expanded
   const showGhost = Boolean(hoveredCard);
 
+  // the foot of the root column — where "more of your day" continues the list
+  const rootColumnBottom =
+    (layout?.cards ?? [])
+      .filter((c) => c.col === 0)
+      .reduce((m, c) => Math.max(m, c.y + c.h), 0) + CARD_GAP;
+
   /**
    * The lineage of whatever you're pointing at, root to leaf.
    *
@@ -412,6 +419,8 @@ export function ZoomSurface() {
         {layout?.skeletons.map((box, i) => (
           <SkeletonCard key={box.key} box={box} index={i} />
         ))}
+
+        {layout && board ? <MoreRootsCard y={rootColumnBottom} /> : null}
 
         {board && layout ? layout.cards.map((card) => (
           <BranchCard

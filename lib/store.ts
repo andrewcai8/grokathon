@@ -34,6 +34,11 @@ interface BoardState {
   expand: (id: string) => void;
   collapse: (id: string) => void;
   setPending: (id: string, on: boolean) => void;
+  /** loading more roots — the root column extends downward */
+  loadingRoots: boolean;
+  setLoadingRoots: (on: boolean) => void;
+  appendRoots: (roots: BranchNode[], posts?: Board["posts"]) => void;
+  rootsExhausted: boolean;
   setError: (id: string, message: string | null) => void;
 
   setHovered: (id: string | null) => void;
@@ -105,6 +110,8 @@ export const useBoard = create<BoardState>((set, get) => ({
   hoveredId: null,
   selectedId: null,
   errors: {},
+  loadingRoots: false,
+  rootsExhausted: false,
 
   zoom: DEFAULT_ZOOM,
   pan: { x: 0, y: 0 },
@@ -190,6 +197,22 @@ export const useBoard = create<BoardState>((set, get) => ({
     if (message) errors[id] = message;
     else delete errors[id];
     set({ errors });
+  },
+
+  setLoadingRoots: (loadingRoots) => set({ loadingRoots }),
+
+  appendRoots: (roots, posts) => {
+    const { board, expanded, pending } = get();
+    if (!board || !roots.length) return;
+    const nodes = { ...board.nodes };
+    for (const r of roots) nodes[r.id] = r;
+    const next: Board = {
+      ...board,
+      nodes,
+      posts: posts ? { ...board.posts, ...posts } : board.posts,
+      root_ids: [...board.root_ids, ...roots.map((r) => r.id)],
+    };
+    set({ board: next, layout: relayout(next, expanded, pending) });
   },
 
   setHovered: (hoveredId) => set({ hoveredId }),

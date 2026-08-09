@@ -194,15 +194,44 @@ export async function POST(req: Request) {
         )
       ).flat();
 
-      const byId = new Map(gathered.map((p) => [p.id, p]));
-      const replies = [...byId.values()]
+      /**
+       * Only replies that earned attention.
+       *
+       * "What people said back" has to mean something. A 0-like reply is one
+       * stranger talking, and showing it as a finding is the same mistake as
+       * an uncited claim — noise presented as signal. Two gates: an absolute
+       * floor so nothing trivial gets through, and a relative one so a huge
+       * thread doesn't let its long tail in on the floor alone.
+       *
+       * When nothing clears the bar we say so. "No notable replies" is a real
+       * answer about the conversation; three quiet replies pretending to be a
+       * finding is not.
+       */
+      const candidates = [...new Map(gathered.map((p) => [p.id, p])).values()]
         .filter((p) => !covered.postIds.has(p.id))
-        .sort((a, b) => (b.metrics?.likes ?? 0) - (a.metrics?.likes ?? 0))
+        .sort((a, b) => (b.metrics?.likes ?? 0) - (a.metrics?.likes ?? 0));
+
+      // Relative, not absolute. Measured on real boards: 79 replies under a
+      // trending story and not one cleared 3 likes — reply engagement runs an
+      // order of magnitude below post engagement, so a fixed floor makes this
+      // permanently empty. "Popular" only means anything relative to the
+      // conversation it's in. We still require at least one like, so a thread
+      // where nobody engaged reports honestly instead of promoting silence.
+      const best = candidates[0]?.metrics?.likes ?? 0;
+      const bar = Math.max(1, Math.round(best * 0.25));
+      const replies = candidates
+        .filter((p) => (p.metrics?.likes ?? 0) >= bar)
         .slice(0, MAX_CHILDREN);
 
       if (!replies.length) {
+        console.log(
+          "[expand/replies] %d replies, best %d likes, bar %d — none notable",
+          candidates.length, best, bar,
+        );
         return NextResponse.json(
-          { error: "no replies on the posts behind this card" },
+          {
+            error: `No notable replies — ${candidates.length} found, none with engagement`,
+          },
           { status: 404 },
         );
       }

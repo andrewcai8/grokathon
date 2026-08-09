@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Board } from "@/lib/schema";
+import { boardKind, useBoard, type BoardKind } from "@/lib/store";
 
 interface Me {
   connected: boolean;
@@ -39,10 +40,20 @@ export function SeedBar({
    * board changes underneath you, so the rail never claims you're somewhere
    * you aren't.
    */
-  const [pane, setPane] = useState<"news" | "options">(board?.kind ?? "news");
+  const [pane, setPane] = useState<BoardKind>(board?.kind ?? "news");
   useEffect(() => {
     if (board?.kind) setPane(board.kind);
   }, [board?.kind]);
+
+  /**
+   * The pane the board currently being fetched is for.
+   *
+   * A first visit to a tab is a network round trip, and flipping back before it
+   * lands is now instant — so the slow answer would arrive on top of the board
+   * you returned to and drag you back to the tab you left. It belongs to a pane
+   * you are no longer standing in, so it is dropped.
+   */
+  const want = useRef<BoardKind>(pane);
 
   /**
    * The other kind of board.
@@ -83,12 +94,19 @@ export function SeedBar({
       .catch(() => {});
   }, []);
 
-  const reseed = async (url: string, what: string, quiet = false) => {
+  const reseed = async (
+    url: string,
+    what: string,
+    quiet = false,
+    /** the pane this load was started for, if it was a tab switch */
+    forPane?: BoardKind,
+  ) => {
     setBusy(what);
     setError(null);
     try {
       const res = await fetch(url);
       const data = await res.json();
+      if (forPane && want.current !== forPane) return false;
       if (data?.board?.root_ids?.length) {
         onBoard(data.board);
         if (data.source === "fixtures" || data.source === "fixtures_fallback") {
@@ -134,36 +152,51 @@ export function SeedBar({
    * that the paradigm generalises, which is otherwise invisible until you type
    * something into it.
    */
-  const tab = (id: "news" | "options", label: string) => (
+  /**
+   * The preset first, your last board second.
+   *
+   * Building one costs two Grok calls, a web search and three images, so
+   * landing on a cold prompt makes the whole second half of the product look
+   * like it hasn't started. The preset is a real board built through the real
+   * pipeline, with its pictures already on disk — so this is a disk read, and
+   * Decide cuts instantly.
+   *
+   * Quietly, in both cases: if neither exists there is nothing to restore, and
+   * the prompt below is the answer rather than an error.
+   */
+  const openOptions = async () => {
+    if (await reseed("/api/seed?snapshot=options-preset", "lastopts", true, "options"))
+      return;
+    await reseed("/api/seed?snapshot=options-latest", "lastopts", true, "options");
+  };
+
+  const tab = (id: BoardKind, label: string) => (
     <button
       key={id}
       onClick={() => {
         setError(null);
         setPane(id);
-        // A toggle that changes the sidebar but not the canvas reads as broken,
-        // so both directions actually move the board. Each kind keeps its own
-        // warm snapshot, so this is a disk read either way — instant.
-        if (id === "news" && board?.kind === "options") {
-          void reseed("/api/seed?snapshot=latest", "snap");
-        }
-        if (id === "options" && board?.kind !== "options") {
-          /**
-           * The preset first, your last board second.
-           *
-           * Building one costs two Grok calls, a web search and three images,
-           * so landing on a cold prompt makes the whole second half of the
-           * product look like it hasn't started. The preset is a real board
-           * built through the real pipeline, with its pictures already on disk
-           * — so this is a disk read, and Decide cuts instantly.
-           *
-           * Quietly, in both cases: if neither exists there is nothing to
-           * restore, and the prompt below is the answer rather than an error.
-           */
-          void reseed("/api/seed?snapshot=options-preset", "lastopts", true).then(
-            (ok) =>
-              ok || reseed("/api/seed?snapshot=options-latest", "lastopts", true),
-          );
-        }
+        want.current = id;
+
+        const store = useBoard.getState();
+        const cur = store.board;
+        if (cur && boardKind(cur) === id) return;
+
+        /**
+         * The board you are leaving is set aside, not thrown away, and one you
+         * have already opened comes back exactly as you left it — columns open,
+         * questions asked, camera where you parked it. Reading the snapshot off
+         * disk again here is what used to wipe all of that, and re-reading it
+         * is only right the first time you arrive.
+         *
+         * A toggle that changes the sidebar but not the canvas reads as broken,
+         * so both directions still move the board.
+         */
+        store.stashCurrent();
+        if (store.restoreKind(id)) return;
+
+        if (id === "news") void reseed("/api/seed?snapshot=latest", "snap", false, "news");
+        else void openOptions();
       }}
       className="gb-label flex-1 border px-2 py-[7px] transition-colors"
       style={{

@@ -6,6 +6,38 @@ import { computeLayout, type Layout } from "./layout";
 import { rollUpCitations } from "./boardBuilder";
 import { DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM, clamp, frameRect, zoomAbout } from "./lod";
 
+export type BoardKind = "news" | "options";
+
+/** A news board predates the field, so an absent kind is the news board. */
+export function boardKind(board: Board): BoardKind {
+  return board.kind ?? "news";
+}
+
+/**
+ * A board you looked away from, whole.
+ *
+ * Everything here is session, not file: which columns you opened, what you
+ * asked, where the camera is. None of it survives a re-read off disk, which is
+ * why looking away used to cost it.
+ */
+interface Stashed {
+  board: Board;
+  expanded: Set<string>;
+  selectedId: string | null;
+  errors: Record<string, string>;
+  zoom: number;
+  pan: { x: number; y: number };
+  rootsExhausted: boolean;
+}
+
+type Stash = Partial<Record<BoardKind, Stashed>>;
+
+function without(stash: Stash, kind: BoardKind): Stash {
+  const next = { ...stash };
+  delete next[kind];
+  return next;
+}
+
 interface BoardState {
   board: Board | null;
   layout: Layout | null;
@@ -22,6 +54,21 @@ interface BoardState {
   viewport: { w: number; h: number };
 
   setBoard: (b: Board) => void;
+  /**
+   * The boards you stepped away from, one per kind, whole.
+   *
+   * Flipping tabs used to re-read the other kind's snapshot off disk. That is
+   * right for a board you have never opened and wrong for one you have: the
+   * columns you expanded, the questions you asked and the pictures Grok drew
+   * came from the session, not the file, so the disk read handed back a board
+   * you had never seen and called it yours. Looking away is not starting over.
+   * The only things that start a board over are the buttons that say so.
+   */
+  stash: Stash;
+  /** set the board on screen aside under its own kind, keeping all of it */
+  stashCurrent: () => void;
+  /** put a stashed board back exactly as it was; false if there isn't one */
+  restoreKind: (kind: BoardKind) => boolean;
   mergeChildren: (
     parentId: string,
     children: BranchNode[],
@@ -106,6 +153,15 @@ interface BoardState {
       postIds?: string[];
       web?: { url: string; title: string; siteName?: string }[];
       grounded?: boolean;
+      /**
+       * A picture for the answer itself, when Grok asked for one.
+       *
+       * Only ever set on a decision board, where seeing the thing is half the
+       * point of a card. It arrives as a PROMPT and no bytes, exactly as an
+       * option's does — the card requests its own image once it's on screen, so
+       * a 7.6s generation never sits inside the wait for the answer.
+       */
+      imagePrompt?: string;
     },
   ) => void;
 
@@ -217,6 +273,7 @@ export const useBoard = create<BoardState>((set, get) => ({
   events: [],
   loadingRoots: false,
   rootsExhausted: false,
+  stash: {},
 
   zoom: DEFAULT_ZOOM,
   pan: { x: 0, y: 0 },
@@ -253,7 +310,76 @@ export const useBoard = create<BoardState>((set, get) => ({
        */
       rootsExhausted: false,
       loadingRoots: false,
+      /**
+       * ...and so does what you had hold of.
+       *
+       * A selection, a hover and an open ask box are all ids, and an id from
+       * the board you just left names nothing on this one — a TOC row lit for
+       * a card that isn't here, or a question box parked in an empty slot.
+       */
+      selectedId: null,
+      hoveredId: null,
+      asking: null,
+      errors: {},
+      /**
+       * The copy we were holding of this kind is now the stale one.
+       *
+       * This is the reset: asking for a board by name — reseed, load snapshot,
+       * three options — is the user saying they want THIS one, so the version
+       * they set aside earlier must not come back the next time they flip.
+       */
+      stash: without(get().stash, boardKind(board)),
     });
+  },
+
+  stashCurrent: () => {
+    const { board, expanded, selectedId, errors, zoom, pan, rootsExhausted, stash } =
+      get();
+    if (!board) return;
+    set({
+      stash: {
+        ...stash,
+        [boardKind(board)]: {
+          board,
+          expanded,
+          selectedId,
+          errors,
+          zoom,
+          pan,
+          rootsExhausted,
+        },
+      },
+    });
+  },
+
+  restoreKind: (kind) => {
+    const held = get().stash[kind];
+    if (!held) return false;
+    set({
+      board: held.board,
+      expanded: held.expanded,
+      selectedId: held.selectedId,
+      errors: held.errors,
+      zoom: held.zoom,
+      pan: held.pan,
+      rootsExhausted: held.rootsExhausted,
+      layout: relayout(held.board, held.expanded),
+      /**
+       * Everything else comes back empty, and `pending` is the one that
+       * matters. An expand still in flight when you looked away either landed
+       * on a board that no longer held its parent — mergeChildren dropped it —
+       * or is still running and will merge when it returns. Either way the id
+       * is not a wait any longer, and restoring it would draw a skeleton
+       * column with nothing coming to fill it.
+       */
+      pending: new Set<string>(),
+      hoveredId: null,
+      asking: null,
+      loadingRoots: false,
+      // it is on screen; it is not also set aside
+      stash: without(get().stash, kind),
+    });
+    return true;
   },
 
   setMedia: (nodeId, url) => {
@@ -438,6 +564,18 @@ export const useBoard = create<BoardState>((set, get) => ({
               ]
             : n.source_urls_meta,
           epistemic: a.grounded === false ? "thin_evidence" : n.epistemic,
+          /**
+           * A prompt and no url: the card fetches its own bytes.
+           *
+           * Never overwrites a picture the card already has — on a decision
+           * board a re-asked question could otherwise swap the image out from
+           * under a card the user is looking at, and the old one is already
+           * paid for and on disk.
+           */
+          media:
+            a.imagePrompt && !n.media
+              ? { kind: "generated_image" as const, alt: a.imagePrompt }
+              : n.media,
         },
       },
     };

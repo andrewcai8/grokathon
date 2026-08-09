@@ -27,7 +27,16 @@ function prefetchTopLevel(board: Board, count = 3) {
     void fetch("/api/expand", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ nodeId: root.id, fork: "deeper" }),
+      body: JSON.stringify({
+        nodeId: root.id,
+        fork: "deeper",
+        // the same copy-and-kind ZoomSurface sends, for the same reason: the
+        // server keeps one board per kind, so a prefetch that names no kind
+        // warms a news root against an options board and 404s into the void
+        node: root,
+        posts: board.posts,
+        kind: board.kind,
+      }),
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {

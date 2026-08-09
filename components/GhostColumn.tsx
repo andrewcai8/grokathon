@@ -34,6 +34,30 @@ export function GhostColumn({ card }: { card: PositionedCard }) {
         >
           {card.node.title}
         </div>
+        {/*
+          The second thing this slot can become.
+
+          Expanding asks the question we chose; asking asks yours, and both land
+          right here — so the plot advertises both rather than hiding one behind
+          a menu. It teaches the key rather than offering a button because the
+          ghost is pointer-events-none by design: reaching for a target inside it
+          means leaving the card, which un-hovers it and takes the target away.
+        */}
+        <div
+          className="gb-label mt-3 flex items-center gap-1.5"
+          style={{ color: "var(--gb-dim)" }}
+        >
+          <span
+            style={{
+              border: "1px solid var(--gb-line-hi)",
+              borderRadius: 2,
+              padding: "1px 4px",
+            }}
+          >
+            @
+          </span>
+          <span>to ask @grok anything</span>
+        </div>
       </div>
     </div>
   );

@@ -64,6 +64,16 @@ Absolute rules:
 export async function optionQueryFor(
   title: string,
   ancestors: string[],
+  /**
+   * Directions already on offer, when this is EXTENDING a set.
+   *
+   * Without it the query is written from the same title with the same context
+   * and comes back word for word — so Exa returns the same pages, every one of
+   * which the novelty rule then strips as already read, and the model is asked
+   * to divide a category on an empty corpus. Measured: a second "more
+   * directions" on the same board retrieved six pages and kept none.
+   */
+  offered: string[] = [],
 ): Promise<string> {
   const schema = {
     type: "object",
@@ -85,7 +95,18 @@ export async function optionQueryFor(
 
 ${ancestors.length ? `THE PERSON IS NARROWING DOWN: ${ancestors.join(" > ")}\n` : ""}CATEGORY: ${title}
 CURRENT YEAR: ${new Date().getFullYear()}
+${
+  offered.length
+    ? `
+THEY HAVE ALREADY BEEN SHOWN THESE DIRECTIONS:
+${offered.map((t) => `- ${t}`).join("\n")}
 
+Aim this query at what that set LEAVES OUT — the same category and the same constraints, but the parts of it those directions do not cover. The pages behind them are already spent, so a query that would return them again returns nothing usable. Do not name them, and do not simply negate them.
+
+THE SUBJECT DOES NOT MOVE. Name the thing itself — the noun out of CATEGORY, not only its qualifiers. "What that set leaves out" means another part of the SAME category, never a different category: by the third or fourth batch the directions on offer cover the obvious ground, and the only thing left to steer away from is the subject. Observed: a board narrowing "help me pick a car under $30k", asked for a fourth batch, wrote a query that kept the budget and dropped the car — it retrieved password-manager pricing pages and the board offered "Mid-market business plans". Those pages are then the ONLY ground truth the next step has, so it divides them faithfully, and the column fills with well-sourced options for a decision nobody asked about.
+`
+    : ""
+}
 Carry down every constraint stated above — a budget or a use case from further up still applies here.
 
 Add NOTHING they did not say. Do not decide new or used, a brand, a body style, or a model year on their behalf: each invented word narrows the search before they have chosen anything, and they will never see what it ruled out. If they did not say "used", the query must not say "used". Use the current year, not a past one.
@@ -110,12 +131,21 @@ export async function optionCorpus(
   title: string,
   ancestors: string[],
   usedUrls: Set<string>,
+  /** directions already on offer, when this is extending a set — see above */
+  offered: string[] = [],
 ): Promise<{ web: WebSource[]; query: string }> {
-  const query = await optionQueryFor(title, ancestors);
+  const query = await optionQueryFor(title, ancestors, offered);
   // 6 x 1000 rather than 8 x 1200: the larger corpus pushed one expand past the
   // SDK's 60s ceiling and returned "Request timed out", and the extra pages were
   // adding length rather than distinct options. Latency IS the product here.
-  const found = await searchWeb(query, { numResults: 6, maxCharacters: 1000 });
+  //
+  // Extending asks for more, because it spends most of a page of results on
+  // pages this board has already read: the same 6 that survive on a first split
+  // can arrive as 1 on a second, and one page is not enough to divide anything.
+  const found = await searchWeb(query, {
+    numResults: offered.length ? 10 : 6,
+    maxCharacters: 1000,
+  });
   return { web: found.filter((w) => !usedUrls.has(w.url)), query };
 }
 
@@ -126,13 +156,36 @@ export async function expandOptions(
   covered: string[],
   web: WebSource[],
   /**
-   * Directions already offered at this level, when this call is EXTENDING a set
-   * rather than creating one. Without it the model re-divides a space it has
-   * already divided and hands back synonyms — "Small cars" for "Compact cars" —
-   * which pass the novelty check on exact titles while adding nothing.
+   * Set when this call is EXTENDING a division rather than creating one.
+   *
+   * `extend` is the directions already offered at this level: without them the
+   * model re-divides a space it has already divided and hands back synonyms —
+   * "Small cars" for "Compact cars" — which pass the novelty check on exact
+   * titles while adding nothing.
+   *
+   * `axis` is the dimension they were divided along. Titles alone underdetermine
+   * it: three sizes could be read as a size axis, a price axis or a use-case
+   * axis, and whichever the model picks this time is the one the new cards join.
+   * Naming it is the difference between continuing a division and starting a
+   * second one on top of the first.
+   *
+   * `labels` are the attribute labels those cards already compare. The whole
+   * point of identical labels is that siblings read DOWN a column against each
+   * other, and a batch generated on its own has no idea what the last one
+   * chose: a fourth truck arrived with "Segment focus / Drivetrains / Engine
+   * options" beside three comparing "Starting price / Fuel economy", so the
+   * column stopped being a comparison at exactly the card that was supposed to
+   * join it.
    */
-  extend?: string[],
-): Promise<{ summary?: string; axis?: string; options: OptionChild[] }> {
+  extending?: { extend?: string[]; axis?: string; labels?: string[] },
+): Promise<{
+  summary?: string;
+  axis?: string;
+  options: OptionChild[];
+  /** the model's own "that's all of them" — see the schema field */
+  exhausted?: boolean;
+}> {
+  const extend = extending?.extend ?? [];
   const schema = {
     type: "object",
     properties: {
@@ -146,9 +199,25 @@ export async function expandOptions(
         description:
           "The single dimension you divided this category along, as a short noun phrase (e.g. 'body style', 'trip length', 'screen size'). Naming it is what forces the three to be different directions rather than three samples of the same one.",
       },
+      /**
+       * "That's all of them", as a field rather than as a card.
+       *
+       * The prompt asks for nothing back when a division is already complete,
+       * but the schema used to require at least one option — so the model
+       * complied the only way it could and returned a card titled "That's all
+       * of them" / "No remaining options", with attributes like
+       * "Coverage: Complete". Both observed live. An option is something a
+       * person could choose; the absence of one is not, and a contract that
+       * has no way to say so guarantees it gets said in the wrong place.
+       */
+      exhausted: {
+        type: "boolean",
+        description:
+          "True only when the directions already on offer cover this space and there is nothing meaningful left to add. When true, return an EMPTY options array. Never express this as an option.",
+      },
       options: {
         type: "array",
-        minItems: 1,
+        minItems: 0,
         maxItems: MAX_CHILDREN,
         items: {
           type: "object",
@@ -218,7 +287,7 @@ export async function expandOptions(
         },
       },
     },
-    required: ["summary", "axis", "options"],
+    required: ["summary", "axis", "exhausted", "options"],
     additionalProperties: false,
   };
 
@@ -230,11 +299,24 @@ ${node.title}${node.body ? `\n${node.body}` : ""}
 Pick ONE dimension to divide this category along, name it in "axis", then give the ${MAX_CHILDREN} options that divide it best. Different directions, not variations: someone choosing between them should face a real trade-off, not a preference between near-identical things.
 
 ${
-  extend?.length
-    ? `These directions are ALREADY on offer at this level:
+  extend.length
+    ? `These directions are ALREADY on offer at this level${extending?.axis ? `, divided by ${extending.axis}` : ""}:
 ${extend.map((t) => `- ${t}`).join("\n")}
 
-CONTINUE that same division — do not start a new one, and do not rename one of the above. Give the directions that set leaves out. If it genuinely covers the space with nothing meaningful left over, return fewer options, or none at all: "that's all of them" is a real answer and a far better one than three synonyms.
+CONTINUE that same division${extending?.axis ? ` — the axis is ${extending.axis}, so every option you add must be another point on it` : " — do not start a new one"}, and do not rename one of the above. Give the directions that set leaves out.
+${
+  extending?.labels?.length
+    ? `
+Those cards compare these attributes, in this order:
+${extending.labels.map((l) => `- ${l}`).join("\n")}
+
+Use the SAME labels, in the SAME order. They are what lets the column be read down one card against the next, and a new card with its own labels is not joining that comparison, it is ending it. If the sources genuinely don't give you one of them, omit that row — but never rename it, and never invent a different attribute in its place.
+`
+    : ""
+}
+FIRST, CHECK THE SOURCES ARE EVEN ABOUT THIS. They came from a search aimed at what the directions above leave out, and that search can miss the subject rather than the covered ground. If the pages below describe a different KIND of thing than the ones already on offer, there is nothing here to divide — set "exhausted" to true and return an EMPTY options array. Dividing them anyway is the one failure this whole call cannot recover from: the options come out real, cited and about the wrong decision, and nothing on the finished card can tell the reader it happened. "The search went somewhere else" and "there is nothing left" are both answered by returning no options, so when the sources look off-subject, return none.
+
+If it genuinely covers the space with nothing meaningful left over, say so: set "exhausted" to true and return an EMPTY options array. "That's all of them" is a real answer and a far better one than three synonyms — but it belongs in that field, never in a card. A card saying "no remaining options" is not something a person can choose, and it lands in the column looking like one.
 
 `
     : ancestors.length
@@ -252,15 +334,18 @@ Every option and every attribute value must come from the sources below. If the 
 SOURCES:
 ${web.length ? web.map((w, i) => webLine(w, `web${i + 1}`)).join("\n\n") : "(none)"}`;
 
-  const out = await structured<{
+  type Out = {
     summary?: string;
     axis?: string;
+    exhausted?: boolean;
     options: OptionChild[];
-  }>(
+  };
+
+  const out = await structured<Out>(
     "narrow_options",
     schema,
     content,
-    (raw) => raw as { summary?: string; axis?: string; options: OptionChild[] },
+    (raw) => raw as Out,
     OPTIONS_SYSTEM,
   );
 
@@ -268,7 +353,9 @@ ${web.length ? web.map((w, i) => webLine(w, `web${i + 1}`)).join("\n\n") : "(non
   // generation is trimmed rather than throwing mid-demo
   return {
     summary: out.summary,
-    axis: out.axis,
+    // the axis being continued survives a generation that forgets to restate it
+    axis: out.axis || extending?.axis,
+    exhausted: Boolean(out.exhausted),
     options: [...(out.options ?? [])]
       .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
       .slice(0, MAX_CHILDREN),

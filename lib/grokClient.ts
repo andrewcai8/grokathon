@@ -73,7 +73,7 @@ const EPISTEMIC_ENUM = [
   "projection",
 ];
 
-const CHILD_PROPS = {
+export const CHILD_PROPS = {
   type: {
     type: "string",
     enum: ["topic", "story", "claim", "post", "person", "media"],
@@ -154,7 +154,7 @@ const GROUNDING_RULES: Record<Grounding, string> = {
 - NEVER return text describing your intent ("Searching X for...", "Looking into..."). The structured output is the finished answer, produced after the tool has run — not a status update. If you have not called the tool yet, call it.`,
 };
 
-function systemFor(grounding: Grounding) {
+export function systemFor(grounding: Grounding) {
   return `You structure a person's X (Twitter) timeline into a nested knowledge tree.
 
 Absolute rules:
@@ -274,6 +274,10 @@ const FORK_INTENT: Record<Fork, string> = {
   media: "the images, video and memes in this story, and what each is arguing",
   falsifiers:
     "what would change my mind: the specific missing evidence, and the observations that would falsify the main claims",
+  // the only fork whose intent the user writes. It never reaches these
+  // single-shot paths — askAgent puts the question itself in the prompt and
+  // gives the model tools to go and answer it.
+  ask: "the user's own question about this — handled by the agent, see askAgent",
 };
 
 function forkInstruction(fork: Fork, grounding: Grounding) {
@@ -378,7 +382,7 @@ ${web.length ? `\nWEB SOURCES (what was reported — often the more reliable evi
 const X_POST_URL = /^https?:\/\/(?:www\.)?x\.com\/([A-Za-z0-9_]+)\/status\/(\d+)/;
 
 /** Pull the last top-level JSON object out of a possibly chatty response. */
-function extractJson<T>(text: string, isValid?: (o: unknown) => boolean): T {
+export function extractJson<T>(text: string, isValid?: (o: unknown) => boolean): T {
   const ok = (o: unknown) => (isValid ? isValid(o) : true);
   try {
     const direct = JSON.parse(text);
@@ -456,6 +460,52 @@ The headline is a synthesised summary and will not appear verbatim in any post. 
   // query shouldn't cost us the whole expand
   const q = (out.query || headline).replace(/\*/g, "").slice(0, 120).trim();
   return `${q} -is:retweet lang:en`;
+}
+
+/**
+ * Words that carry no search signal. Small on purpose — this is a fallback, and
+ * over-pruning a headline is how you end up searching for "Over" and "Mix".
+ */
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "over", "for", "with", "of", "in", "on",
+  "to", "at", "as", "by", "from", "after", "amid", "into", "its", "his", "her",
+  "their", "this", "that", "new", "says", "said", "why", "how", "what",
+]);
+
+/**
+ * The query to try when the model's query found nothing.
+ *
+ * `searchQueryFor` writes a precise query, and precise is exactly what fails
+ * here: it ANDs several terms of a synthesised headline against posts that
+ * phrase the story differently, and X returns an empty page. We watched this
+ * happen to the user's #1 personalised trend — zero posts for the loudest story
+ * on their timeline — and because an empty result is indistinguishable from
+ * "nothing was posted about this", the board went on to state that as a finding.
+ *
+ * So the fallback trades precision for the thing that actually matters at this
+ * point: returning something real. OR rather than AND, proper nouns first
+ * because those are what survive a rewording, and no `lang:` filter — a story
+ * being discussed in another language is still the story.
+ *
+ * Model-free by design. It runs when a model call has already disappointed us,
+ * and it must not be able to fail the same way twice.
+ */
+export function relaxedQuery(headline: string): string {
+  const words = headline
+    // keep hashtags and handles whole; they're the highest-signal terms there are
+    .replace(/[^\p{L}\p{N}\s#@]/gu, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w.toLowerCase()));
+
+  // Proper nouns are what a rewrite preserves: "OpenAI" survives, "Exchange"
+  // doesn't. Require two before trusting them, or a headline that happens to
+  // start with one ordinary capitalised word searches for that word alone.
+  const proper = words.filter((w) => /^[\p{Lu}#@]/u.test(w));
+  const terms = (proper.length >= 2 ? proper : words).slice(0, 4);
+
+  // nothing usable — hand back the headline and let the caller report empty
+  if (!terms.length) return `${headline.slice(0, 100)} -is:retweet`;
+  return `${terms.join(" OR ")} -is:retweet`;
 }
 
 /** Turn an x.com permalink into a real XPost we can render as a citation chip. */
@@ -772,11 +822,126 @@ ${SHARED_RULES}`,
 }
 
 /**
+ * Vision as an intermediate result rather than as cards.
+ *
+ * readMedia turns pictures into finished nodes. The ask agent needs the step
+ * before that: what is in this image, so it can decide whether that answers the
+ * question. Same verified call shape, prose out instead of children.
+ */
+export async function readImagesRaw(
+  media: { ref: string; url: string; postId: string; alt?: string; handle?: string; text?: string }[],
+): Promise<{ post_id: string; shows: string }[]> {
+  const schema = {
+    type: "object",
+    properties: {
+      images: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            ref: { type: "string", description: "The ref of the image you are describing." },
+            shows: {
+              type: "string",
+              description:
+                "What this image actually shows, in 1-2 sentences. A chart's axes and what it plots; what a screenshot is of; who is in a photo. Say so plainly if it is illegible.",
+            },
+          },
+          required: ["ref", "shows"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["images"],
+    additionalProperties: false,
+  };
+
+  const content: Record<string, unknown>[] = [
+    { type: "input_text", text: "Describe each image below. Use its ref." },
+  ];
+  for (const m of media) {
+    content.push({
+      type: "input_text",
+      text: `\n${m.ref}${m.handle ? ` — posted by @${m.handle}` : ""}${m.text ? `: "${m.text.slice(0, 200)}"` : ""}${m.alt ? `\nalt text: ${m.alt}` : ""}`,
+    });
+    content.push({ type: "input_image", image_url: m.url, detail: "high" });
+  }
+
+  const res = await grok().responses.create({
+    model: GROK_MODEL,
+    reasoning_effort: REASONING_EFFORT,
+    input: [
+      {
+        role: "system",
+        content: `You report what images actually depict. Only ever describe an image you were shown; never infer contents from a caption. If it is illegible or ambiguous, say so rather than guessing.`,
+      },
+      { role: "user", content },
+    ],
+    text: { format: { type: "json_schema", name: "image_readings", strict: true, schema } },
+  } as unknown as Parameters<OpenAI["responses"]["create"]>[0]);
+
+  const text = outputTextOf(res);
+  if (!text) return [];
+  const parsed = extractJson<{ images: { ref: string; shows: string }[] }>(text, (o) =>
+    Array.isArray((o as { images?: unknown })?.images),
+  );
+  // map the opaque ref back to the post on this side, exactly as the media
+  // fork does — a reading of an image we never sent has nowhere to land
+  return (parsed.images ?? [])
+    .map((r) => {
+      const m = media.find((x) => x.ref === r.ref);
+      return m ? { post_id: m.postId, shows: r.shows } : null;
+    })
+    .filter((r): r is { post_id: string; shows: string } => Boolean(r));
+}
+
+/**
+ * One turn of a tool-using agent.
+ *
+ * Verified against the live API before this was written, because the shape
+ * differs from every other call in this file:
+ *   - custom `function` tools, server-side tools and a strict `text.format`
+ *     json_schema all coexist on /v1/responses.
+ *   - the model returns SEVERAL `function_call` items in one turn, so a caller
+ *     that reads `output[0]` silently drops half the work it asked for.
+ *   - continuation is `previous_response_id` + `function_call_output` items as
+ *     the entire next `input`. Measured: the second turn reported 1920 cached
+ *     input tokens, so the loop is far cheaper than resending the transcript.
+ *   - `output_text` is undefined on the raw payload — outputTextOf reads both.
+ */
+export async function agentTurn(opts: {
+  input: unknown[];
+  tools: unknown[];
+  previousResponseId?: string;
+  schema: Record<string, unknown>;
+  schemaName: string;
+  /** server-side tool budget, per turn */
+  maxToolCalls?: number;
+}): Promise<{ id?: string; output?: unknown[] }> {
+  const res = await grok().responses.create({
+    model: GROK_MODEL,
+    reasoning_effort: REASONING_EFFORT,
+    max_tool_calls: opts.maxToolCalls ?? 6,
+    ...(opts.previousResponseId ? { previous_response_id: opts.previousResponseId } : {}),
+    input: opts.input,
+    tools: opts.tools,
+    text: {
+      format: {
+        type: "json_schema",
+        name: opts.schemaName,
+        strict: true,
+        schema: opts.schema,
+      },
+    },
+  } as unknown as Parameters<OpenAI["responses"]["create"]>[0]);
+  return res as unknown as { id?: string; output?: unknown[] };
+}
+
+/**
  * The SDK synthesises output_text, but the raw Responses payload only carries
  * output[].content[].text — confirmed by probing both. Read either, so this
  * doesn't turn into a silent empty string if the SDK shape shifts.
  */
-function outputTextOf(res: unknown): string {
+export function outputTextOf(res: unknown): string {
   const r = res as {
     output_text?: string;
     output?: { type?: string; content?: { type?: string; text?: string }[] }[];

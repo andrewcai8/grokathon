@@ -7,6 +7,7 @@ import { CARD_GAP, CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
 import { readMediaUrls } from "@/lib/media";
 import { BranchCard } from "./BranchCard";
 import { GhostColumn } from "./GhostColumn";
+import { AskComposer } from "./AskComposer";
 import { SkeletonCard } from "./SkeletonCard";
 import { MoreRootsCard } from "./MoreRootsCard";
 import type { Board } from "@/lib/schema";
@@ -253,8 +254,48 @@ export function ZoomSurface() {
     };
 
     const onKey = (e: KeyboardEvent) => {
+      /**
+       * Never steal a keystroke from something being typed into.
+       *
+       * These are bare character bindings on `window`, so before @ existed they
+       * were already firing inside the seed bar — typing "under $30k" zoomed the
+       * board out twice and reset the view. Asking makes that unignorable, since
+       * every question contains letters.
+       */
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+
       const s = useBoard.getState();
       const c = { x: s.viewport.w / 2, y: s.viewport.h / 2 };
+
+      /**
+       * @ opens the composer on whatever you're pointing at.
+       *
+       * The muscle memory is X's: you reply to a post by typing @grok, and here
+       * the card under the cursor IS the post you're replying to. Hover wins
+       * over selection for the same reason it does everywhere else on this
+       * surface — it's what you're currently looking at.
+       */
+      if (e.key === "@") {
+        const target = s.hoveredId ?? s.selectedId;
+        if (target && s.board?.nodes[target]) {
+          e.preventDefault();
+          s.startAsk(target);
+        }
+        return;
+      }
+      if (e.key === "Escape" && s.asking) {
+        s.cancelAsk();
+        return;
+      }
+
       if (e.key === "=" || e.key === "+") s.setZoom(s.zoom * 1.22, c);
       else if (e.key === "-" || e.key === "_") s.setZoom(s.zoom / 1.22, c);
       else if (e.key === "0") s.resetView();
@@ -280,7 +321,13 @@ export function ZoomSurface() {
 
   /** Ask Grok for children on a given fork and graft them into the graph. */
   const requestExpand = useCallback(
-    (id: string, fork: string, append: boolean) => {
+    (
+      id: string,
+      fork: string,
+      append: boolean,
+      /** fork "ask" only — the user's question and the corpus to start from */
+      ask?: { question: string; corpus: string[] },
+    ) => {
       const s = useBoard.getState();
       const startedAt = performance.now();
       s.setPending(id, true);
@@ -298,6 +345,10 @@ export function ZoomSurface() {
           posts: s.board?.posts,
           // ...and what the board is FOR, for exactly the same reason
           kind: s.board?.kind,
+          // the decision this board is narrowing — a root's own title never
+          // contains the subject, so without this the web query for
+          // "Budget frames under $250" is about no particular thing
+          boardQuestion: s.board?.seed.label,
           /**
            * Images the board has already read.
            *
@@ -308,6 +359,7 @@ export function ZoomSurface() {
            * rather than depending on which side remembers.
            */
           readMedia: s.board ? [...readMediaUrls(s.board)] : [],
+          ...(ask ?? {}),
         }),
       })
         .then(async (r) => {
@@ -316,7 +368,18 @@ export function ZoomSurface() {
           return data;
         })
         .then((data) => {
-          if (!data?.children?.length) {
+          /**
+           * An ask succeeds on the ANSWER, not on the children.
+           *
+           * For every other fork, no children means nothing happened and the
+           * card must say so. For an ask the reply itself is the result — it
+           * lands on the question card as its body — and plenty of good
+           * questions have one straight answer and no evidence cards behind
+           * it. Throwing here was discarding a perfectly good answer and
+           * showing an error in its place.
+           */
+          const answered = Boolean(data?.summary);
+          if (!data?.children?.length && !answered) {
             throw new Error("Grok returned nothing for this branch");
           }
           useBoard.getState().setError(id, null);
@@ -336,8 +399,22 @@ export function ZoomSurface() {
           useBoard
             .getState()
             .mergeChildren(id, data.children, data.posts, append, data.summary, data.axis);
+          // The answer's own citations land on the question card, so an ask
+          // that returns no cards is still visibly grounded. Must run AFTER
+          // mergeChildren, which rebuilds this node from its children.
+          if (data.source === "x_agent") {
+            useBoard.getState().applyAnswer(id, {
+              postIds: data.answerPostIds,
+              web: data.answerWeb,
+              grounded: data.grounded,
+            });
+          }
           useBoard.getState().expand(id);
-          requestAnimationFrame(() => revealColumn(data.children[0].id));
+          // with no children there is no new column to fly to — the answer
+          // landed on the card the user is already looking at
+          if (data.children?.length) {
+            requestAnimationFrame(() => revealColumn(data.children[0].id));
+          }
         })
         .catch((err: unknown) => {
           // a silent failure is indistinguishable from a dead card — say it
@@ -411,10 +488,40 @@ export function ZoomSurface() {
     [revealColumn, requestExpand],
   );
 
+  /**
+   * Ask @grok about a card, in the user's own words.
+   *
+   * The question becomes a real node before the request goes out, so what the
+   * user sees is: they type, the card they typed into becomes theirs, and the
+   * evidence lands underneath it. requestExpand then treats that node like any
+   * other — the agent is just the fork it happens to run.
+   */
+  const submitAsk = useCallback(
+    (parentId: string, question: string) => {
+      const s = useBoard.getState();
+      const parent = s.board?.nodes[parentId];
+      const q = s.addQuestion(parentId, question);
+      if (!q) return;
+      // the card's own evidence is the agent's starting corpus — it has no
+      // citations of its own to derive one from, being a question
+      requestExpand(q.id, "ask", false, {
+        question,
+        corpus: parent?.source_post_ids ?? [],
+      });
+      requestAnimationFrame(() => revealColumn(q.id));
+    },
+    [requestExpand, revealColumn],
+  );
+
+  const askingId = useBoard((s) => s.asking);
+  const cancelAsk = useBoard((s) => s.cancelAsk);
+  const askingCard = askingId ? layout?.byId[askingId] : undefined;
+
   const hoveredCard =
     hoveredId && !expanded.has(hoveredId) ? layout?.byId[hoveredId] : undefined;
-  // every card previews, because every card can be expanded
-  const showGhost = Boolean(hoveredCard);
+  // every card previews, because every card can be expanded — but not while
+  // the composer already owns that slot
+  const showGhost = Boolean(hoveredCard) && hoveredCard?.node.id !== askingId;
 
   // the foot of the root column — where "more of your day" continues the list
   const rootColumnBottom =
@@ -471,6 +578,18 @@ export function ZoomSurface() {
         ))}
 
         {showGhost && hoveredCard ? <GhostColumn card={hoveredCard} /> : null}
+
+        {/* The composer takes the ghost's slot — you type where the answer lands.
+            Keyed by node so asking a different card remounts it empty rather
+            than carrying the last question over. */}
+        {askingCard ? (
+          <AskComposer
+            key={askingCard.node.id}
+            card={askingCard}
+            onSubmit={(q: string) => submitAsk(askingCard.node.id, q)}
+            onCancel={cancelAsk}
+          />
+        ) : null}
 
         {layout?.skeletons.map((box, i) => (
           <SkeletonCard key={box.key} box={box} index={i} />

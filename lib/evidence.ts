@@ -98,6 +98,38 @@ export function isContestable(kind: BoardKind | undefined) {
 }
 
 /**
+ * Is there anything real behind this node at all?
+ *
+ * One definition, deliberately, because two consumers depend on it and they
+ * must never disagree: the HUD counts GROUNDED / NODES with this test, and the
+ * card marks itself unsourced with the same one. A telemetry panel that reports
+ * 92% grounded while every card on screen looks equally sourced is a panel
+ * making a claim the board doesn't back up — which is the exact failure this
+ * product is built to not commit.
+ *
+ * Deliberately structural rather than a judgement: `thin_evidence` is Grok's
+ * opinion of the evidence, this is whether any exists. A node can be both, and
+ * the two say different things.
+ *
+ * `origin` counts. A trending root is grounded in X's trend service the moment
+ * it is built — X asserted it, with a post volume — and the node asserts
+ * nothing beyond that until it gains a body. Excluding it made the board's
+ * loudest card mark ITSELF as unsourced while the whole seed came from X, which
+ * is the same class of lie as the reverse.
+ */
+export function isGrounded(node: {
+  source_post_ids: string[];
+  source_urls_meta?: unknown[];
+  origin?: unknown;
+}): boolean {
+  return (
+    node.source_post_ids.length > 0 ||
+    (node.source_urls_meta?.length ?? 0) > 0 ||
+    Boolean(node.origin)
+  );
+}
+
+/**
  * Which posts get to be the evidence.
  *
  * Every retrieval returns more than a card can carry — 40 search hits, 100

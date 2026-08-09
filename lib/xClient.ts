@@ -12,8 +12,18 @@ import type { XPost } from "./schema";
 
 const API = "https://api.x.com/2";
 
+/**
+ * `entities` is what makes `text` readable rather than merely present. X stores
+ * every link in a post as an opaque t.co shortcode, so without it a cited post
+ * reads "...the full report here https://t.co/9xKd2Vb" — which cites nothing.
+ *
+ * `note_tweet` carries posts past the old 280-character limit. `text` truncates
+ * them mid-sentence with no marker, so a long post — which on this timeline
+ * means most of the substantive ones — was being cited by its first paragraph
+ * while the claim it was cited FOR sat in the part we discarded.
+ */
 const TWEET_FIELDS =
-  "created_at,text,public_metrics,conversation_id,referenced_tweets,attachments,author_id,lang";
+  "created_at,text,entities,note_tweet,public_metrics,conversation_id,referenced_tweets,attachments,author_id,lang";
 const USER_FIELDS = "name,username,profile_image_url,verified";
 /**
  * width/height are load-bearing, not nice-to-have: the card sizes each frame
@@ -45,12 +55,24 @@ interface RawMedia {
   height?: number;
   duration_ms?: number;
 }
+interface RawEntities {
+  urls?: {
+    url: string;
+    expanded_url?: string;
+    display_url?: string;
+    /** set when this link is X's own trailing link to attached media */
+    media_key?: string;
+  }[];
+}
 interface RawTweet {
   id: string;
   text: string;
   author_id?: string;
   created_at?: string;
   conversation_id?: string;
+  entities?: RawEntities;
+  /** present only on posts longer than 280 chars; `text` is the truncated form */
+  note_tweet?: { text?: string; entities?: RawEntities };
   public_metrics?: {
     like_count: number;
     retweet_count: number;
@@ -89,12 +111,73 @@ export async function getMe(token: string) {
   return json.data;
 }
 
+/**
+ * The post as a person would read it.
+ *
+ * Every link in `text` is a t.co shortcode; we swap in the display form X
+ * itself renders (`nytimes.com/2026/02/…`), because the domain is the part
+ * that carries meaning. Links to the post's OWN attached media are deleted
+ * outright rather than shortened — the picture is already on the card, so the
+ * shortcode is a dangling reference to something you can see.
+ *
+ * Substring replacement instead of the `start`/`end` offsets X supplies: those
+ * are code-point indices and JS slices UTF-16, so a single emoji earlier in a
+ * post shifts every span after it. t.co codes are unique, which makes replace
+ * both simpler and correct.
+ */
+function readableText(t: Pick<RawTweet, "text" | "entities" | "note_tweet">) {
+  // the long form when there is one — `text` is its first 280 characters,
+  // cut mid-word, with nothing to say it was cut
+  const source = t.note_tweet?.text ?? t.text;
+  const entities = t.note_tweet?.text ? (t.note_tweet.entities ?? t.entities) : t.entities;
+
+  let out = source;
+  for (const u of entities?.urls ?? []) {
+    if (!u.url) continue;
+    out = out.split(u.url).join(u.media_key ? "" : (u.display_url ?? u.expanded_url ?? u.url));
+  }
+
+  // X serves post text HTML-escaped, so "R&D" arrives as "R&amp;D". We render
+  // it as text, not markup, so it has to be decoded exactly once — `&amp;`
+  // goes LAST or "&amp;lt;" would decode twice into a stray "<".
+  out = out
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&");
+
+  return out.replace(/[ \t]+$/gm, "").trim();
+}
+
+function toAuthor(id: string | undefined, u: RawUser | undefined) {
+  return {
+    id: id ?? "unknown",
+    handle: u?.username ?? "unknown",
+    name: u?.name ?? "Unknown",
+    // _normal is 48px and renders like a thumbnail of a thumbnail on a retina card
+    avatar_url: u?.profile_image_url?.replace("_normal", "_x96"),
+    verified: u?.verified,
+  };
+}
+
 function normalize(json: RawResponse): XPost[] {
   const users = new Map((json.includes?.users ?? []).map((u) => [u.id, u]));
   const media = new Map((json.includes?.media ?? []).map((m) => [m.media_key, m]));
+  /**
+   * The quote/reply parents we've been asking for and discarding. Keyed here so
+   * a post can carry the thing it quotes rather than just its ID.
+   */
+  const referenced = new Map((json.includes?.tweets ?? []).map((t) => [t.id, t]));
 
   return (json.data ?? []).map((t) => {
     const u = t.author_id ? users.get(t.author_id) : undefined;
+
+    const quotedId = t.referenced_tweets?.find((r) => r.type === "quoted")?.id;
+    const q = quotedId ? referenced.get(quotedId) : undefined;
+    const qu = q?.author_id ? users.get(q.author_id) : undefined;
+
     const attached = (t.attachments?.media_keys ?? [])
       .map((k) => media.get(k))
       .filter((m): m is RawMedia => Boolean(m))
@@ -114,14 +197,8 @@ function normalize(json: RawResponse): XPost[] {
 
     return {
       id: t.id,
-      text: t.text,
-      author: {
-        id: t.author_id ?? "unknown",
-        handle: u?.username ?? "unknown",
-        name: u?.name ?? "Unknown",
-        avatar_url: u?.profile_image_url?.replace("_normal", "_x96"),
-        verified: u?.verified,
-      },
+      text: readableText(t),
+      author: toAuthor(t.author_id, u),
       created_at: t.created_at ?? new Date().toISOString(),
       url: u ? `https://x.com/${u.username}/status/${t.id}` : undefined,
       metrics: t.public_metrics
@@ -135,6 +212,14 @@ function normalize(json: RawResponse): XPost[] {
       media: attached.length ? attached : undefined,
       conversation_id: t.conversation_id,
       referenced_post_ids: t.referenced_tweets?.map((r) => r.id),
+      quoted: q
+        ? {
+            id: q.id,
+            text: readableText(q),
+            author: toAuthor(q.author_id, qu),
+            url: qu ? `https://x.com/${qu.username}/status/${q.id}` : undefined,
+          }
+        : undefined,
     } satisfies XPost;
   });
 }

@@ -6,6 +6,7 @@ import {
   hasGrok,
   MAX_CHILDREN,
   readMedia,
+  relaxedQuery,
   searchQueryFor,
   XSEARCH_FORKS,
 } from "@/lib/grokClient";
@@ -26,7 +27,8 @@ import {
   rollUpCitations,
 } from "@/lib/boardBuilder";
 import { expandOptions, optionCorpus } from "@/lib/optionsExpander";
-import { rankEvidence, type BoardKind } from "@/lib/evidence";
+import { askAgent } from "@/lib/askAgent";
+import { isGrounded, rankEvidence, type BoardKind } from "@/lib/evidence";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
 import { getPostsByIds, getReplies, searchRecent } from "@/lib/xClient";
@@ -90,6 +92,86 @@ async function verifyCitations(posts: XPost[]): Promise<Record<string, XPost>> {
 }
 
 /**
+ * Enough posts to say something, rather than enough to prove we searched.
+ *
+ * One number, two callers, because it is one judgement: below this an expand
+ * produces a shrug rather than a reading. It decides both when to go and fetch
+ * fresh evidence (the novel corpus has run dry) and when a search that returned
+ * *something* still hasn't returned enough (see groundNode). Those were briefly
+ * two constants holding the same 5 for the same reason, which is the kind of
+ * pair that silently stops agreeing.
+ */
+const MIN_CORPUS = 5;
+
+/**
+ * Go and find posts for a node, and don't take silence for an answer.
+ *
+ * The failure this exists for, observed on a live board: the user's #1
+ * personalised trend produced no usable posts, because `searchQueryFor` writes
+ * a precise query and precision is what fails against a synthesised headline.
+ * It ANDs several terms of a summary nobody phrased that way against posts that
+ * phrase it differently. The empty result then travelled onward
+ * indistinguishable from "nothing was posted about this" — so the board wrote
+ * that down as a finding, on the loudest card on screen, about the story X had
+ * just told us everyone was discussing.
+ *
+ * Measured against that exact trend while it was still live, the precise query
+ * returned ONE post. So "did we get anything" is the wrong bar — one post is a
+ * corpus you can't write from, and it was already known to produce "no corpus
+ * evidence for X" (see the x_search note below). We top up from a blunter query
+ * instead of replacing: the precise hits are the most on-topic ones we'll get,
+ * they just aren't enough on their own.
+ *
+ * And the two silences stay apart — no posts because nobody posted, and no
+ * posts because the search failed, are different facts, and only one of them is
+ * about the world.
+ */
+async function groundNode(
+  token: string,
+  title: string,
+): Promise<{ posts: XPost[]; query?: string; error?: string }> {
+  const queries: string[] = [];
+  try {
+    queries.push(await searchQueryFor(title));
+  } catch (err) {
+    // one flaky model call must not cost us the retrieval it was only phrasing
+    console.warn("[expand] query generation failed, falling back to terms:", err);
+  }
+  queries.push(relaxedQuery(title));
+
+  // insertion order is preference order: whatever the precise query found stays
+  // in front of the top-up, and dedupe keeps the overlap from counting twice
+  const byId = new Map<string, XPost>();
+  const used: string[] = [];
+  let error: string | undefined;
+
+  for (const query of queries) {
+    try {
+      const posts = await searchRecent(token, query, 40);
+      for (const p of posts) if (!byId.has(p.id)) byId.set(p.id, p);
+      if (posts.length) used.push(query);
+      // the second query costs ~300ms and only runs when the first left us
+      // without enough to write from
+      if (byId.size >= MIN_CORPUS) break;
+      console.warn(
+        "[expand] X search returned %d post(s) — below the floor — for: %s",
+        posts.length, query,
+      );
+    } catch (err) {
+      error = err instanceof Error ? err.message : "X search failed";
+      console.error("[expand] X search FAILED (not empty) for %s: %s", query, error);
+    }
+  }
+
+  return {
+    posts: [...byId.values()],
+    query: used.join("  |  ") || undefined,
+    // a search that ultimately found posts is not a failed one
+    error: byId.size ? undefined : error,
+  };
+}
+
+/**
  * The expand contract (doc §3.4): structured children, never a chat dump.
  * Capped, cited, honestly labelled.
  */
@@ -120,6 +202,23 @@ export async function POST(req: Request) {
      * the same screenshot twice.
      */
     readMedia?: string[];
+    /** fork "ask" only: the user's question, verbatim */
+    question?: string;
+    /**
+     * Options boards only: the decision the whole board is narrowing, i.e. the
+     * seed label. Travels with the request for the same reason `node` and
+     * `kind` do — the server's one board slot is routinely something else.
+     */
+    boardQuestion?: string;
+    /**
+     * fork "ask" only: ids of the posts the agent should start from.
+     *
+     * A question node is minted by the client and cites nothing of its own —
+     * it's a question, not a claim — so there is no citedPosts() to derive the
+     * starting corpus from. The card it was asked FROM has one, and the client
+     * is the only side guaranteed to know which card that was.
+     */
+    corpus?: string[];
   };
   const nodeId = body.nodeId;
   if (!nodeId) {
@@ -130,7 +229,18 @@ export async function POST(req: Request) {
     ? (body.fork as Fork)
     : "deeper";
 
-  const serverBoard = getBoard();
+  /**
+   * What the board is FOR is settled first, because it picks the slot.
+   *
+   * The server keeps one board per kind, so the kind has to be known before
+   * there is a board to read it off — and the client is the one that knows:
+   * it's the thing displaying it. This used to read `board.kind ?? body.kind`
+   * against a single shared slot, which meant the answer depended on whichever
+   * board that slot happened to be holding.
+   */
+  const kind: BoardKind = body.kind ?? "news";
+
+  const serverBoard = getBoard(kind);
   const node = serverBoard?.nodes[nodeId] ?? body.node;
   if (!node) {
     return NextResponse.json(
@@ -151,12 +261,8 @@ export async function POST(req: Request) {
         // that board, and borrowing its corpus made ungrounded nodes look
         // grounded, which routed bare headlines away from x_search
         posts: body.posts ?? {},
-        kind: body.kind,
+        kind,
       };
-
-  // The server's board wins when it owns the node, for the same reason it wins
-  // on the graph; otherwise trust what the client says its board is for.
-  const kind: BoardKind = board.kind ?? body.kind ?? "news";
 
   // Already expanded on this fork — serve from the graph, instantly.
   //
@@ -183,6 +289,181 @@ export async function POST(req: Request) {
   }
 
   /**
+   * @grok — the user wrote the fork themselves.
+   *
+   * Same seam as every other fork: a node in, at most N cited children out.
+   * What differs is that we don't know what the question needs, so this is the
+   * one path where the model chooses its own retrieval — see askAgent.
+   *
+   * The question is the node's TITLE, not a parameter, because the client mints
+   * a real question node before calling. That's what makes two different
+   * questions on one card two different branches instead of a cache collision,
+   * and it's why nothing above this line needed a special case for "ask".
+   */
+  if (fork === "ask") {
+    if (!hasGrok()) {
+      return NextResponse.json({ error: "XAI_API_KEY not set" }, { status: 503 });
+    }
+    /**
+     * Ask is a CLAIM-shaped fork, so it belongs to claim-shaped boards.
+     *
+     * It runs before the kind check because a question node is minted by the
+     * client and needs handling before anything reads the board — but that
+     * ordering meant asking a question on a decision board answered with claim
+     * cards carrying epistemic badges and X post citations. Options aren't true
+     * or false, so that is the one category error the evidence split exists to
+     * prevent, and it was the only cross-kind leak anywhere in the API.
+     *
+     * Refused rather than silently answered in the wrong currency. Delete this
+     * the moment ask learns to answer in attributes.
+     */
+    if (kind === "options") {
+      return NextResponse.json(
+        { error: "asking isn't supported on a decision board yet" },
+        { status: 422 },
+      );
+    }
+    const question = (body.question ?? node.title).trim();
+    if (!question) {
+      return NextResponse.json({ error: "question required" }, { status: 400 });
+    }
+
+    try {
+      const tok = await activeToken();
+      const ancestors = serverBoard?.nodes[nodeId]
+        ? ancestorTitles(board, nodeId)
+        : (body.ancestors ?? []);
+      // the card's own evidence is where the agent starts; it decides whether
+      // that is enough and goes and gets more if not
+      const corpus = (body.corpus ?? [])
+        .map((id) => board.posts[id])
+        .filter(Boolean) as XPost[];
+
+      const out = await askAgent({
+        question,
+        parent: node,
+        ancestors,
+        corpus,
+        covered: coveredGround(board, nodeId).titles,
+        xToken: tok?.access_token,
+      });
+
+      // Only the posts actually cited reach the board. The agent's pool can
+      // hold sixty posts after four searches and the other fifty-odd are
+      // working memory, not evidence — shipping them would bloat every
+      // snapshot and make coveredGround think the user had read them.
+      const citedIds = new Set([
+        ...out.children.flatMap((c) => c.source_post_ids),
+        // the answer's own sources travel too, or a zero-card ask would ship
+        // citation ids with no posts for the chips to render from
+        ...out.answerPostIds,
+      ]);
+      const posts = Object.fromEntries(
+        [...citedIds].map((id) => [id, out.posts[id]]).filter(([, p]) => Boolean(p)),
+      ) as Record<string, XPost>;
+
+      let children = childrenToNodes(node, out.children, posts, "ask").map((c, i) => {
+        const refs = out.children[i]?.source_web_ids ?? [];
+        const cited = [
+          ...new Map(
+            refs
+              .map((r) => out.web[Number(String(r).replace(/\D/g, "")) - 1])
+              .filter(Boolean)
+              .map((w) => [w.url, w] as const),
+          ).values(),
+        ];
+        return cited.length
+          ? {
+              ...c,
+              source_urls_meta: cited.map((w) => ({
+                url: w.url,
+                title: w.title,
+                siteName: w.siteName,
+              })),
+            }
+          : c;
+      });
+
+      /**
+       * Uncited CARDS are dropped. The ANSWER is never dropped.
+       *
+       * Every other fork now REPORTS a total grounding failure rather than
+       * showing anything for it, because a card nothing backs is worse than an
+       * error. An ask is the one fork that can lose all its cards and still
+       * have something to show: the answer sits on the question card either
+       * way. So this drops silently all the way to zero instead of erroring —
+       * a question with a straight answer and no evidence cards is a normal,
+       * good outcome. (It's also what stopped a degenerate generation titled
+       * "placeholder" from being promoted into a lone thin_evidence finding.)
+       */
+      const before = children.length;
+      children = children.filter(isGrounded);
+      if (children.length < before) {
+        console.warn(
+          "[expand/ask] dropped %d/%d cards with no surviving evidence",
+          before - children.length,
+          before,
+        );
+      }
+
+      /**
+       * An ask is NOT written into the server board, and deliberately so.
+       *
+       * This used to graft the question node and its answers into the shared
+       * graph, keyed off the parent, so a rehearsed question would be warm on
+       * stage. That was a mistake with a much bigger blast radius than the
+       * benefit: the server board is one process-wide object that every client
+       * seeds from, and persistWarmedBoard writes it to .snapshots/latest.json.
+       * So every question anyone ever asked came back on every future load,
+       * hanging off the card it was asked from — four test questions were
+       * enough to make a fresh board look like it had duplicated itself.
+       *
+       * A question belongs to the person who typed it and to the session they
+       * typed it in. The client already owns the question node outright (it
+       * mints it, and sends it back as body.node), so keeping it client-side
+       * costs nothing except that a rehearsed ask is no longer pre-warmed.
+       */
+
+      console.log(
+        '[expand/ask] "%s" -> %d tool calls (%s) -> %d children',
+        question,
+        out.trace.length,
+        out.trace.map((t) => `${t.tool}:${t.got}`).join(" ") || "none",
+        children.length,
+      );
+
+      return NextResponse.json({
+        children,
+        posts,
+        fork: "ask",
+        // becomes the question node's body — mergeChildren already does
+        // `body ||= summary`, so the card you typed into fills itself in with
+        // the direct answer while the evidence lands underneath it
+        summary: out.answer,
+        source: "x_agent",
+        trace: out.trace,
+        // the card renders an unsourced answer differently — it's Grok
+        // talking, not evidence, and the two must not look alike here
+        grounded: out.grounded,
+        // the answer's own citations, rendered under the reply itself so an
+        // ask that returns no cards is still visibly grounded
+        answerPostIds: out.answerPostIds.filter((id) => posts[id]),
+        answerWeb: out.answerWeb.map((w) => ({
+          url: w.url,
+          title: w.title,
+          siteName: w.siteName,
+        })),
+      });
+    } catch (err) {
+      console.error("[expand/ask]", err);
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "ask failed" },
+        { status: 500 },
+      );
+    }
+  }
+
+  /**
    * An options board narrows instead of evidencing.
    *
    * Same seam as replies: a node in, at most N more specific children out, one
@@ -200,9 +481,37 @@ export async function POST(req: Request) {
     }
     try {
       const covered = coveredGround(board, nodeId);
-      const ancestors = serverBoard?.nodes[nodeId]
+      const lineage = serverBoard?.nodes[nodeId]
         ? ancestorTitles(board, nodeId)
         : (body.ancestors ?? []);
+
+      /**
+       * The question is the first ancestor of every option on the board.
+       *
+       * A root's ancestors are [] — its parent is the question, and the question
+       * has no card. So the entire retrieval context for a root expand was its
+       * own title, and option titles are written as points on an axis rather
+       * than as things: "Budget frames under $250", "Short-haul (under 6 hours)",
+       * "Solid setups $300-$500". None of those contain the subject. Searching
+       * the web for them returns whatever that phrase means to the open
+       * internet, so a standing-desk board expanded into digital photo frames,
+       * a winter-sun board into airlines, and a headphones board into
+       * smartphones — every card beautifully sourced and about the wrong
+       * product entirely. Nothing on the card could tell you it had happened,
+       * which makes it the exact failure the grounding invariant exists to
+       * prevent: confident, cited, and not about what you asked.
+       *
+       * The board's seed label IS the question, so it leads the lineage. The
+       * client sends it for the same reason it sends the node and the kind:
+       * the server's single board slot may be showing something else entirely.
+       */
+      const question = (
+        board.kind === "options" && board.seed.label !== "client"
+          ? board.seed.label
+          : body.boardQuestion
+      )?.trim();
+      const ancestors =
+        question && !lineage.includes(question) ? [question, ...lineage] : lineage;
 
       // sources already used on this board are removed before the model sees
       // them — structural novelty, exactly as posts are for news
@@ -214,19 +523,71 @@ export async function POST(req: Request) {
         );
       }
 
-      const { options, summary, axis } = await expandOptions(
+      const { options, summary, axis, exhausted } = await expandOptions(
         node,
         ancestors,
         covered.titles,
         web,
       );
+
+      /**
+       * "That's all of them" is an answer, not a failure.
+       *
+       * The expander can now say a category divides no further and hand back an
+       * empty set deliberately. This route didn't know that and turned it into a
+       * 502, so the honest end of a refinement — the point where you've actually
+       * converged on a choice, which is what the whole board is FOR — rendered
+       * as "no options returned" in warning colour with an invitation to retry.
+       * A dead end you can't tell from a crash is the worst of both.
+       *
+       * Empty WITHOUT that flag is still a real failure and still says so.
+       */
+      /**
+       * Exhaustion has to be earned.
+       *
+       * "That's all of them" is a real answer at the bottom of a funnel, where
+       * the node already names one specific purchasable thing. Near the TOP it
+       * is almost always a retrieval miss wearing the answer's clothes: the
+       * corpus came back about the wrong subject, the model correctly found it
+       * could not divide the parent along its axis, and said so — one observed
+       * summary read "these are adjustable bed frames, not sit-stand desks"
+       * while the route forwarded it as a successful, terminal expansion.
+       *
+       * Measured: a category whose own summary named its split ("body style and
+       * the step up to Sport Touring") still claimed exhaustion on 6 of 7
+       * identical calls. So a shallow claim of exhaustion is not trusted — it
+       * is reported as the failure it is, which is the whole of I4.
+       */
+      const MIN_EXHAUSTIBLE_DEPTH = 2;
+      if (!options.length && exhausted && node.depth < MIN_EXHAUSTIBLE_DEPTH) {
+        console.warn(
+          "[expand/options] rejected exhausted at depth %d for %s (query: %s)",
+          node.depth, node.title, query,
+        );
+        return NextResponse.json(
+          {
+            error: `no options found for "${node.title}" — the sources came back off-subject`,
+          },
+          { status: 422 },
+        );
+      }
+
       if (!options.length) {
-        return NextResponse.json({ error: "no options returned" }, { status: 502 });
+        return exhausted
+          ? NextResponse.json({
+              children: [],
+              posts: {},
+              fork: "deeper",
+              exhausted: true,
+              summary,
+              source: "web",
+            })
+          : NextResponse.json({ error: "no options returned" }, { status: 502 });
       }
 
       const children = optionsToNodes(node, options, web);
 
-      if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
+      if (serverBoard?.nodes[nodeId]) patchBoard(kind, (b) => {
         const prev = b.nodes[nodeId];
         if (!prev) return b;
         const nodes = { ...b.nodes };
@@ -242,7 +603,7 @@ export async function POST(req: Request) {
         return { ...b, nodes };
       });
 
-      after(() => persistWarmedBoard(getBoard()));
+      after(() => persistWarmedBoard(getBoard(kind)));
       console.log(
         "[expand/options] %s -> %s -> %d options (axis: %s)",
         node.title, query, children.length, axis ?? "none",
@@ -420,7 +781,7 @@ export async function POST(req: Request) {
         );
       }
 
-      if (serverBoard?.nodes[nodeId]) patchBoard((b) =>
+      if (serverBoard?.nodes[nodeId]) patchBoard(kind, (b) =>
         b.nodes[nodeId]
           ? {
               ...b,
@@ -440,7 +801,7 @@ export async function POST(req: Request) {
             }
           : b,
       );
-      after(() => persistWarmedBoard(getBoard()));
+      after(() => persistWarmedBoard(getBoard(kind)));
       console.log(
         "[expand/media] %s: %d images sent (%d dead), %d claims",
         node.title, media.length, found.length - media.length, children.length,
@@ -551,7 +912,7 @@ export async function POST(req: Request) {
         posts,
         fork,
       );
-      patchBoard((b) =>
+      patchBoard(kind, (b) =>
         b.nodes[nodeId]
           ? {
               ...b,
@@ -571,7 +932,7 @@ export async function POST(req: Request) {
           : b,
       );
       // rehearsing the demo path is what warms the snapshot — see persistWarmedBoard
-      after(() => persistWarmedBoard(getBoard()));
+      after(() => persistWarmedBoard(getBoard(kind)));
       return NextResponse.json({ children, posts, fork, source: "x_replies" });
     } catch (err) {
       console.error("[expand/replies]", err);
@@ -626,6 +987,8 @@ export async function POST(req: Request) {
     let web: WebSource[] = [];
     /** set only when the web search THREW — never when it simply found nothing */
     let webError: string | undefined;
+    /** the same distinction for X: a failed search is not an empty timeline */
+    let xError: string | undefined;
 
     /**
      * Fetch fresh evidence when the novel corpus runs dry.
@@ -652,8 +1015,7 @@ export async function POST(req: Request) {
      * to that lives on X, not in the hundred posts that happened to cross
      * their feed. So depth >= 1 always goes and gets new posts.
      */
-    const MIN_NOVEL_CORPUS = 5;
-    const wantsFresh = node.depth >= 1 || corpus.length < MIN_NOVEL_CORPUS;
+    const wantsFresh = node.depth >= 1 || corpus.length < MIN_CORPUS;
 
     /**
      * The web is fetched for every model-written expand.
@@ -679,7 +1041,39 @@ export async function POST(req: Request) {
             startPublishedDate: new Date(
               Date.now() - 14 * 24 * 3600 * 1000,
             ).toISOString(),
-          }).catch((err) => {
+          })
+            /**
+             * Novelty applies to articles too.
+             *
+             * Posts already cited are stripped from the corpus before the model
+             * sees them, and the options board does the same for its web
+             * sources — but the news path computed covered.urls and never used
+             * it. Measured on a live subtree: 15 distinct urls across 26
+             * citations, 9 reused, one article cited on four cards including a
+             * parent and its own child. That is exactly how a level-4 card ends
+             * up a rewording of level 3: same evidence in, same words out. The
+             * rule is meant to be structural, not remembered, so the reused
+             * article never reaches the prompt at all.
+             */
+            .then((found) => {
+              /**
+               * Including this node's OWN articles.
+               *
+               * coveredGround deliberately excludes the node being expanded, so
+               * that its own evidence stays available as context for reasoning
+               * about it. Correct for posts, wrong for this: the article behind
+               * the card you just clicked is the one thing you have certainly
+               * already read, and re-serving it is how a child ends up a
+               * rewording of its parent. Measured: one url cited on four cards,
+               * a parent and its own child among them.
+               */
+              const read = new Set([
+                ...covered.urls,
+                ...(node.source_urls_meta ?? []).map((w) => w.url),
+              ]);
+              return found.filter((w) => !read.has(w.url));
+            })
+            .catch((err) => {
             /**
              * A failed search is not an empty one.
              *
@@ -702,19 +1096,39 @@ export async function POST(req: Request) {
       const tok = await activeToken();
       if (tok?.access_token) {
         try {
-          const q = await searchQueryFor(node.title);
           // X and the web in parallel: what people are saying, and what was
           // reported. For a factual claim the reporting is usually the better
           // evidence, and it's real by construction either way.
-          const [found, webFound] = await Promise.all([
-            searchRecent(tok.access_token, q, 40)
-              // rank before the corpus is capped: a search returns forty hits
-              // and the model reads them in the order we hand them over
-              .then((r) => rankEvidence(r.filter(isNew)))
-              .catch(() => [] as XPost[]),
+          const [hits, webFound] = await Promise.all([
+            groundNode(tok.access_token, node.title),
             webPromise,
           ]);
           web = webFound;
+          xError = hits.error;
+
+          /**
+           * Novelty is a preference, not a precondition.
+           *
+           * `isNew` strips every post the board has already cited, which is
+           * right for a node that HAS evidence — depth should teach you
+           * something. For a node with none it is backwards: it can strip the
+           * search down to nothing and leave the card ungrounded, and a post
+           * you've seen elsewhere is still infinitely better grounding than the
+           * board admitting it found nothing. So the filter applies, and then
+           * gets out of the way if it emptied the only evidence we have.
+           */
+          // rank before the corpus is capped: a search returns forty hits and
+          // the model reads them in the order we hand them over
+          const fresh = rankEvidence(hits.posts.filter(isNew));
+          const found =
+            fresh.length || grounded ? fresh : rankEvidence(hits.posts);
+          if (found.length && !fresh.length) {
+            console.log(
+              "[expand] %s: novelty left 0 of %d hits; grounding on them anyway",
+              nodeId, hits.posts.length,
+            );
+          }
+
           if (found.length || web.length) {
             // for a deep node the fresh posts ARE the evidence; padding with
             // unrelated timeline posts is what produced the dead ends
@@ -723,7 +1137,7 @@ export async function POST(req: Request) {
             groundedNow = true;
             console.log(
               "[expand] refreshed %s via X search: %s -> %d new posts (corpus %d)",
-              nodeId, q, found.length, corpus.length,
+              nodeId, hits.query ?? "(no query succeeded)", found.length, corpus.length,
             );
           }
         } catch (err) {
@@ -804,10 +1218,11 @@ export async function POST(req: Request) {
      * resolved against the corpus we fetched, with unresolvable refs already
      * dropped, so nothing here can be fabricated the way an x_search permalink
      * can.
+     *
+     * Shares isGrounded with the card and the HUD deliberately — three places
+     * deciding "does anything back this" must not be able to disagree.
      */
-    const cited = children.filter(
-      (c) => c.source_post_ids.length > 0 || (c.source_urls_meta?.length ?? 0) > 0,
-    );
+    const cited = children.filter(isGrounded);
     if (cited.length > 0 && cited.length < children.length) {
       console.warn(
         "[expand] dropped %d/%d claims left with no surviving evidence",
@@ -816,14 +1231,41 @@ export async function POST(req: Request) {
       );
       children = cited;
     } else if (cited.length === 0) {
-      children = children.slice(0, 1).map((c) => ({
-        ...c,
-        epistemic: "thin_evidence" as const,
-      }));
+      /**
+       * Nothing survived. Report it; do not plant it.
+       *
+       * This used to keep one uncited child as the honest "nothing found here"
+       * answer, and the honesty didn't survive contact with the board. What
+       * shipped was a permanent card reading "No corpus evidence for <story>"
+       * with the red no-sources marker, wired under X's #1 trend — and because
+       * `body: prev.body ?? summary` runs below, the parent adopted the
+       * apology as its own text. The failure then became load-bearing: its
+       * title entered `coveredGround`, so every later attempt at that story was
+       * told it had already been covered.
+       *
+       * A transient error is what this actually is. The replies fork has
+       * reported exactly this way for a while (404 "No notable replies") and
+       * the card stays expandable, which is the behaviour you want from a
+       * search that came back thin — retryable, and gone by the next attempt.
+       */
+      console.warn("[expand] %s: no child survived grounding — reporting, not planting", nodeId);
+      return NextResponse.json(
+        {
+          error: xError
+            ? `Couldn't reach X for this one — ${xError}`
+            : webError
+              ? `Found nothing on X, and the web search failed — ${webError}`
+              : "Nothing solid enough to cite yet — try again in a moment",
+          fork,
+          xError,
+          webError,
+        },
+        { status: 422 },
+      );
     }
 
     // only patch the server graph when it actually owns this node
-    if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
+    if (serverBoard?.nodes[nodeId]) patchBoard(kind, (b) => {
       const prev = b.nodes[nodeId];
       // the board can be reseeded while a 10s expand is in flight — if this
       // node's board is gone, drop the patch rather than crashing the request
@@ -833,10 +1275,28 @@ export async function POST(req: Request) {
       nodes[nodeId] = rollUpCitations(
         {
           ...prev,
-          children_ids:
-            fork === "deeper"
-              ? children.map((c) => c.id)
-              : [...prev.children_ids, ...children.map((c) => c.id)],
+          /**
+           * Replace this fork's branch, never anyone else's.
+           *
+           * A re-run of "deeper" used to overwrite children_ids outright, which
+           * silently deleted the Counters, Replies and Primary branches hanging
+           * off the same card. The nodes themselves survive in the graph with
+           * nothing pointing at them, so they persist into the snapshot as
+           * orphans — 27 of 147 nodes at one point — and the cache that makes a
+           * rehearsed demo instant stops finding them, so the next click pays
+           * full price to regenerate work that was already done.
+           *
+           * Keep every child that belongs to a DIFFERENT fork, drop the ones
+           * this call is replacing, append the new batch.
+           */
+          children_ids: [
+            ...prev.children_ids.filter((id) => {
+              const kid = b.nodes[id];
+              if (!kid) return false;
+              return fork === "deeper" ? Boolean(kid.fork) : kid.fork !== fork;
+            }),
+            ...children.map((c) => c.id),
+          ],
           // a bare trending headline gets its story once we've actually
           // searched — grounded now, so writing it is no longer an invention
           body: prev.body || summary,
@@ -850,7 +1310,7 @@ export async function POST(req: Request) {
 
     // Persist AFTER the response flushes: the disk write must never sit in the
     // latency path of an expand the user is watching.
-    after(() => persistWarmedBoard(getBoard()));
+    after(() => persistWarmedBoard(getBoard(kind)));
 
     // ship the posts back so the client can render their citation chips
     return NextResponse.json({
@@ -865,6 +1325,8 @@ export async function POST(req: Request) {
       // evidence is missing and the card must not imply we looked and found
       // nothing
       webError,
+      // and the mirror image: the web carried this one while X was unreachable
+      xError,
     });
   } catch (err) {
     console.error("[expand]", err);

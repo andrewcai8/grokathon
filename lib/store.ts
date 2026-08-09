@@ -52,6 +52,48 @@ interface BoardState {
   setHovered: (id: string | null) => void;
   select: (id: string) => void;
 
+  /**
+   * The card whose ghost slot is currently a question box, if any.
+   *
+   * Only ever one: the composer occupies the slot where that card's children
+   * will land, and two open at once would be two cards claiming one piece of
+   * canvas. Opening a second closes the first.
+   */
+  asking: string | null;
+  startAsk: (nodeId: string) => void;
+  cancelAsk: () => void;
+  /**
+   * Mint a question node under `parentId` and graft it in immediately.
+   *
+   * Returns the new node so the caller can expand it. This happens BEFORE the
+   * request goes out: the question is the user's own words, so there is nothing
+   * to wait for and nothing a server could add. The card is on screen in the
+   * slot they typed into on the next frame, and the answer fills in underneath
+   * it — the board's "never open on a spinner" rule applied to asking.
+   */
+  addQuestion: (parentId: string, question: string) => BranchNode | null;
+  /**
+   * Attach an answer's own citations to the question card.
+   *
+   * Every other node gets its citations from its children rolling up. A
+   * question card can't rely on that, because the good outcome for an ask is
+   * often a straight answer and NO cards — and an uncited answer sitting alone
+   * on the board is exactly what the epistemic layer exists to prevent. So the
+   * answer carries its own sources, like an @grok reply on X does.
+   *
+   * `grounded: false` means nothing stood behind it at all, which is allowed
+   * (asking always answers) but must be visible — thin_evidence is what that
+   * already means everywhere else here.
+   */
+  applyAnswer: (
+    nodeId: string,
+    a: {
+      postIds?: string[];
+      web?: { url: string; title: string; siteName?: string }[];
+      grounded?: boolean;
+    },
+  ) => void;
+
   setZoom: (z: number, focal?: { x: number; y: number }) => void;
   nudgeZoom: (delta: number, focal: { x: number; y: number }) => void;
   setPan: (p: { x: number; y: number }) => void;
@@ -185,6 +227,17 @@ export const useBoard = create<BoardState>((set, get) => ({
        */
       zoom: DEFAULT_ZOOM,
       pan: { x: 0, y: 0 },
+      /**
+       * ...and so does what's left to read.
+       *
+       * "Exhausted" is a fact about one board's remaining roots, and it hides
+       * the affordance outright. Carried across a switch it hid "More
+       * directions" on a brand-new decision board because a news board had run
+       * out of trends earlier in the session — a dead-looking column with no
+       * way to tell it wasn't broken.
+       */
+      rootsExhausted: false,
+      loadingRoots: false,
     });
   },
 
@@ -255,6 +308,101 @@ export const useBoard = create<BoardState>((set, get) => ({
       nodes,
       posts: posts ? { ...board.posts, ...posts } : board.posts,
     };
+    set({ board: next, layout: relayout(next, expanded, get().pending) });
+  },
+
+  asking: null,
+  startAsk: (nodeId) => set({ asking: nodeId, selectedId: nodeId }),
+  cancelAsk: () => set({ asking: null }),
+
+  addQuestion: (parentId, question) => {
+    const { board, expanded } = get();
+    const parent = board?.nodes[parentId];
+    if (!board || !parent) return null;
+
+    const now = new Date().toISOString();
+    const q: BranchNode = {
+      // minted here rather than server-side, unlike every other node, because
+      // nothing about a question needs a round trip — the user already wrote it
+      id: `ask_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      type: "fork",
+      title: question,
+      parent_id: parentId,
+      children_ids: [],
+      // sits above that card's other children: you asked it last, so it is the
+      // thing you are looking at
+      priority: 1,
+      generality: Math.max(0, parent.generality - 0.05),
+      depth: parent.depth + 1,
+      /**
+       * A question cites nothing.
+       *
+       * It is not a claim, so there is nothing for it to be grounded in — the
+       * same reason an option carries attributes instead of an epistemic
+       * status. Its ANSWERS carry the citations, and roll up onto it from
+       * below like any other parent.
+       */
+      source_post_ids: [],
+      has_children: true,
+      fork: "ask",
+      created_at: now,
+      updated_at: now,
+    };
+
+    const nodes = {
+      ...board.nodes,
+      [q.id]: q,
+      [parentId]: {
+        ...parent,
+        children_ids: [...parent.children_ids, q.id],
+        has_children: true,
+        updated_at: now,
+      },
+    };
+    // open the parent AND the question: the question's own skeletons are what
+    // the user watches fill in, and they only lay out if it is expanded
+    const next = new Set(expanded);
+    next.add(parentId);
+    next.add(q.id);
+    const nextBoard = { ...board, nodes };
+    set({
+      board: nextBoard,
+      expanded: next,
+      asking: null,
+      selectedId: q.id,
+      layout: relayout(nextBoard, next, get().pending),
+    });
+    return q;
+  },
+
+  applyAnswer: (nodeId, a) => {
+    const { board, expanded } = get();
+    const n = board?.nodes[nodeId];
+    if (!board || !n) return;
+    const postIds = (a.postIds ?? []).filter((id) => board.posts[id]);
+    const next: Board = {
+      ...board,
+      nodes: {
+        ...board.nodes,
+        [nodeId]: {
+          ...n,
+          // union, because children rolling up may already have contributed —
+          // and a chip rendered twice is a duplicate React key
+          source_post_ids: [...new Set([...n.source_post_ids, ...postIds])],
+          source_urls_meta: a.web?.length
+            ? [
+                ...new Map(
+                  [...(n.source_urls_meta ?? []), ...a.web].map((w) => [w.url, w]),
+                ).values(),
+              ]
+            : n.source_urls_meta,
+          epistemic: a.grounded === false ? "thin_evidence" : n.epistemic,
+        },
+      },
+    };
+    // the card just grew a citation row (and possibly a picture with it), so
+    // its measured height predates its content — see forgetHeight
+    forgetHeight(nodeId);
     set({ board: next, layout: relayout(next, expanded, get().pending) });
   },
 
@@ -358,6 +506,9 @@ export const EPISTEMIC_LABEL: Record<string, string> = {
 };
 
 export const FORK_LABEL: Record<Fork, string> = {
+  // An answer's provenance is the question, and the question is right there on
+  // the parent card — so the badge says how it was found, not what was asked.
+  ask: "Asked",
   deeper: "Deeper",
   replies: "Replies",
   counter: "Counters",

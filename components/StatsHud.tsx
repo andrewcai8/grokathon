@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { isGrounded } from "@/lib/evidence";
 import { useBoard } from "@/lib/store";
 
 /**
@@ -60,9 +61,9 @@ export function StatsHud() {
       (p) => p.unverified,
     ).length;
     const deepest = nodes.reduce((m, n) => Math.max(m, n.depth), 0);
-    const grounded = nodes.filter(
-      (n) => n.source_post_ids.length > 0 || (n.source_urls_meta?.length ?? 0) > 0,
-    ).length;
+    // the same predicate the cards mark themselves with, so this percentage and
+    // the board underneath it can never tell different stories
+    const grounded = nodes.filter(isGrounded).length;
 
     return {
       nodes: nodes.length,

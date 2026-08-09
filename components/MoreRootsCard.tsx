@@ -1,5 +1,6 @@
 "use client";
 
+import { coveredGround } from "@/lib/boardBuilder";
 import { CARD_W, LEFT_PAD } from "@/lib/layout";
 import { useBoard } from "@/lib/store";
 
@@ -24,12 +25,44 @@ export function MoreRootsCard({ y }: { y: number }) {
   const load = async () => {
     const s = useBoard.getState();
     if (s.loadingRoots) return;
+    const b = s.board;
+    if (!b) return;
     s.setLoadingRoots(true);
     try {
+      /**
+       * Send the board, for the same reason expand sends its node.
+       *
+       * This used to post `{ count: 3 }` and let the route read its own module
+       * memory — but that memory is one slot, and every page load overwrites it
+       * with a news board. So a refresh, or a second tab, left the server
+       * answering "more directions" on a decision board with three trend
+       * headlines: text cards, no attributes, no images. The board on screen is
+       * the only thing that knows what this button means, so it travels with
+       * the click.
+       */
+      const covered = coveredGround(b);
       const res = await fetch("/api/roots/more", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ count: 3 }),
+        body: JSON.stringify({
+          count: 3,
+          kind: b.kind,
+          question: b.seed.label,
+          // the division the roots are points on, so more of them continue it
+          // rather than starting a second division on top of the first
+          axis: b.axis,
+          // titles so the new batch extends this division, attributes so it
+          // joins the comparison instead of starting a second one beside it
+          roots: b.root_ids
+            .map((id) => b.nodes[id])
+            .filter(Boolean)
+            .map((n) => ({ title: n.title, attributes: n.attributes })),
+          covered: {
+            titles: covered.titles,
+            urls: [...covered.urls],
+            postIds: [...covered.postIds],
+          },
+        }),
       });
       const data = await res.json();
       if (data?.roots?.length) {

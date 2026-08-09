@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
-import { optionsToNodes } from "@/lib/boardBuilder";
+import { rootOptions } from "@/lib/boardBuilder";
 import { hasGrok } from "@/lib/grokClient";
 import { expandOptions, optionCorpus } from "@/lib/optionsExpander";
 import { hasExa } from "@/lib/exaClient";
 import { setBoard } from "@/lib/serverBoard";
-import type { Board, BranchNode } from "@/lib/schema";
+import type { Board } from "@/lib/schema";
 
 export const dynamic = "force-dynamic";
 
@@ -52,33 +52,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no options returned" }, { status: 502 });
     }
 
-    // the synthetic parent is a wiring fixture, never a card
-    const seedNode: BranchNode = {
-      id: "__seed",
-      type: "option",
-      title: question,
-      parent_id: null,
-      children_ids: [],
-      priority: 1,
-      generality: 1,
-      depth: -1,
-      source_post_ids: [],
-      has_children: true,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    const roots = optionsToNodes(seedNode, options, web).map((n) => ({
-      ...n,
-      parent_id: null,
-      depth: 0,
-      generality: 1,
-      axis: undefined,
-    }));
+    // the synthetic parent is a wiring fixture, never a card — see rootOptions
+    const roots = rootOptions(question, options, web);
 
     const board: Board = {
       date: new Date().toISOString().slice(0, 10),
       kind: "options",
+      // the roots' own axis, kept on the board because the thing it divided is
+      // the question, and the question has no card to hang it on
+      axis,
       seed: { mode: "search", label: question },
       nodes: Object.fromEntries(roots.map((r) => [r.id, r])),
       root_ids: roots.map((r) => r.id),

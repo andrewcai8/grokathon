@@ -3,12 +3,14 @@
 import { memo, useEffect, useRef } from "react";
 import type { PositionedCard } from "@/lib/layout";
 import type { Board, Fork, XPost } from "@/lib/schema";
-import { isContestable } from "@/lib/evidence";
+import { isContestable, isGrounded } from "@/lib/evidence";
 import { cardMedia, readMediaUrls } from "@/lib/media";
 import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight } from "@/lib/store";
+import { postedAt, stamp } from "@/lib/time";
 import { CardMedia } from "./CardMedia";
 import { OptionImage } from "./OptionImage";
-import { PostChip } from "./PostChip";
+import { MoreCitations, PostChip } from "./PostChip";
+import { compact } from "./PostPopover";
 import { SourceChip } from "./SourceChip";
 
 /**
@@ -33,21 +35,19 @@ const EPISTEMIC_TONE: Record<string, string> = {
  * drops the long tail rather than whoever happened to be cited first.
  */
 function distinctAccounts(posts: XPost[]) {
-  const byAccount = new Map<string, { post: XPost; count: number }>();
+  const byAccount = new Map<string, XPost[]>();
   for (const p of posts) {
     const key = p.author.handle.toLowerCase();
     const hit = byAccount.get(key);
-    if (hit) {
-      hit.count += 1;
-      // keep the account's best-performing post as the chip's link target
-      if ((p.metrics?.likes ?? 0) > (hit.post.metrics?.likes ?? 0)) hit.post = p;
-    } else {
-      byAccount.set(key, { post: p, count: 1 });
-    }
+    if (hit) hit.push(p);
+    else byAccount.set(key, [p]);
   }
-  return [...byAccount.values()].sort(
-    (a, b) => (b.post.metrics?.likes ?? 0) - (a.post.metrics?.likes ?? 0),
-  );
+  // Each group keeps ALL of the account's posts, best-performing first: that
+  // one is the chip's link target, and the rest are what the panel opens onto.
+  // Collapsing them to a count here is what made `×3` a dead end.
+  return [...byAccount.values()]
+    .map((ps) => [...ps].sort((a, b) => (b.metrics?.likes ?? 0) - (a.metrics?.likes ?? 0)))
+    .sort((a, b) => (b[0].metrics?.likes ?? 0) - (a[0].metrics?.likes ?? 0));
 }
 
 /** Enough to read corroboration at a glance; past this it's just wallpaper. */
@@ -106,7 +106,53 @@ function BranchCardInner({
    * see the thing rather than who said it.
    */
   const isOption = !isContestable(board.kind);
+  /**
+   * A card the user wrote the title of.
+   *
+   * Minted client-side when they ask (store.addQuestion), so its title is the
+   * question verbatim and its body is Grok's direct answer. Everything about it
+   * that differs from a claim follows from that: it asserts nothing itself, so
+   * it carries no epistemic status and offers no forks of its own — the
+   * evidence and the arguing live on its children.
+   */
+  const isQuestion = n.type === "fork" && n.fork === "ask";
   const webSources = n.source_urls_meta ?? [];
+  /**
+   * X's trend, when this card is one.
+   *
+   * Provenance, not a citation: it says where the headline came from, not that
+   * anything under it has been evidenced. The two are shown in the same line
+   * precisely because they're the same question — what is this card made of —
+   * and a trending root that has since rolled up its children's posts honestly
+   * reads as both ("trending on X · 4 accounts").
+   */
+  const trend = n.origin?.kind === "x_trend" ? n.origin : undefined;
+  /**
+   * When the evidence was posted. Null on an options board (a hatchback wasn't
+   * posted at a time) and null when nothing under this card is a confirmed post.
+   */
+  const posted = isOption ? null : postedAt(posts);
+  /**
+   * What the card is made of, counted. Empty when it's made of nothing, which
+   * is the case `unsourced` below exists to say out loud.
+   */
+  const provenance = [
+    trend
+      ? trend.postCount
+        ? `trending on X · ${compact(trend.postCount)} posts`
+        : "trending on X"
+      : null,
+    sources.length ? `${sources.length} ${sources.length === 1 ? "account" : "accounts"}` : null,
+    webSources.length
+      ? `${webSources.length} ${webSources.length === 1 ? "article" : "articles"}`
+      : null,
+  ].filter((s): s is string => s !== null);
+  /**
+   * A question is the one card that may honestly cite nothing: it asserts
+   * nothing. Its answer and the arguing hang off its children, and those get
+   * held to the normal standard.
+   */
+  const unsourced = !isQuestion && !isGrounded(n);
   /**
    * The pictures behind this card. We have been fetching these on every X call
    * and throwing them away — a quarter of a real timeline carries media, so
@@ -165,13 +211,43 @@ function BranchCardInner({
           className="gb-detail gb-label mb-2.5 flex items-center gap-2"
           style={{ color: "var(--gb-faint)" }}
         >
+          {/* "fork" is our word for the mechanism, not a kind of thing anyone
+              is looking at. A card the user asked for is a question, and saying
+              so costs nothing and needs no new node type — the type enum stays
+              six entries wide for Grok to choose from, which is the point. */}
           <span>
-            {String(card.col).padStart(2, "0")} / {n.type}
+            {String(card.col).padStart(2, "0")} / {isQuestion ? "question" : n.type}
           </span>
+          {/* WHEN, next to WHERE. A date is as much this node's address as its
+              column is — on a board seeded on a day, a claim whose newest
+              citation is from Tuesday is a different claim from the same
+              sentence posted an hour ago, and that was previously readable only
+              by hovering the citations one at a time. */}
+          {posted ? (
+            <span className="tabular-nums" style={{ color: "var(--gb-dim)" }}>
+              {stamp(posted)}
+            </span>
+          ) : null}
           {/* which fork produced this child. we record it, so we show it —
               otherwise a counter-branch is indistinguishable from a deeper one
-              once it lands in the same column. */}
-          {n.fork ? (
+              once it lands in the same column.
+
+              A question node is the exception: it wasn't produced by a fork,
+              it IS one, and the title below is the user's own words rather than
+              anything Grok wrote. Saying "Asked" on it would credit the model
+              with the question. */}
+          {isQuestion ? (
+            <span
+              className="border px-1 py-[1px]"
+              style={{
+                borderColor: "var(--gb-live)",
+                color: "var(--gb-live)",
+                borderRadius: 2,
+              }}
+            >
+              You asked @grok
+            </span>
+          ) : n.fork ? (
             <span
               className="border px-1 py-[1px]"
               style={{
@@ -222,8 +298,29 @@ function BranchCardInner({
           ) : null}
         </h3>
 
+        {/* On a question card the title is what YOU said and the body is what
+            Grok said back, so it gets attributed. Without this the answer reads
+            as a description of the question rather than as a reply to it — the
+            one card on the board with two voices on it. */}
+        {isQuestion && n.body ? (
+          <div
+            className="gb-attribution gb-label mt-3 flex items-center gap-1.5"
+            style={{ color: "var(--gb-live)" }}
+          >
+            <span>@grok</span>
+            {n.epistemic === "thin_evidence" ? (
+              <span style={{ color: "var(--gb-faint)" }}>· answered without searching</span>
+            ) : null}
+          </div>
+        ) : null}
+
         {n.body ? (
-          <p className="gb-body mt-2 text-[13px] leading-[1.55] tracking-[-0.002em]">
+          <p
+            className={`gb-body mt-2 leading-[1.55] tracking-[-0.002em] ${isQuestion ? "text-[14px]" : "text-[13px]"}`}
+            // an answer is prose the user asked for and will actually read, so
+            // it keeps its paragraphs instead of collapsing into one block
+            style={isQuestion ? { whiteSpace: "pre-wrap" } : undefined}
+          >
             {n.body}
           </p>
         ) : null}
@@ -305,44 +402,64 @@ function BranchCardInner({
                   />
                 ))}
               </div>
-            ) : null
-          ) : n.epistemic ? (
-            <div
-              className="gb-label"
-              style={{
-                color: EPISTEMIC_TONE[n.epistemic] ?? "var(--gb-faint)",
-                fontSize: "10.5px",
-              }}
-            >
-              {EPISTEMIC_LABEL[n.epistemic]}
-              {sources.length ? (
-                <span style={{ color: "var(--gb-faint)" }}>
-                  {"  ·  "}
-                  {/* account count only — the ×N badges already carry how many
-                      posts each one contributed, and spelling both out here
-                      wrapped the status line onto two rows */}
-                  {sources.length} {sources.length === 1 ? "account" : "accounts"}
+            ) : (
+              /* An option with no sources is the more dangerous unsourced card,
+                 not the less: a price and a range read as facts about a real
+                 product, and nobody hovers a spec sheet to check where it came
+                 from. Same marker, same reason. */
+              <div
+                className="gb-label"
+                style={{ color: "var(--gb-warn)", fontSize: "10.5px" }}
+              >
+                no sources
+              </div>
+            )
+          ) : (
+            /* The provenance line: what this card is made of, and what the
+               board thinks of it.
+
+               It used to render only when Grok had stamped an epistemic status,
+               which meant the cards carrying the LEAST information about
+               themselves — no status, and often no sources either — were the
+               ones that said nothing at all. Exactly backwards. The mix is
+               stated whenever there is one, and its absence is stated too. */
+            <div className="gb-label" style={{ fontSize: "10.5px" }}>
+              {n.epistemic ? (
+                <span style={{ color: EPISTEMIC_TONE[n.epistemic] ?? "var(--gb-faint)" }}>
+                  {EPISTEMIC_LABEL[n.epistemic]}
                 </span>
               ) : null}
-              {/* Reporting counts toward corroboration too. "Widely shared"
-                  across two accounts and three outlets is a different claim
-                  from the same status across two accounts, and the whole point
-                  of retrieving the web alongside X was that for a factual claim
-                  the reporting is usually the better evidence. */}
-              {webSources.length ? (
+              {/* Where it came from, in the counts themselves: "4 accounts" is a
+                  card built out of X, "3 articles" is one built out of
+                  reporting, and both together is the corroboration the web
+                  retrieval was added for. A separate X / WEB tag would say the
+                  same thing twice.
+
+                  Account count only — the ×N badges already carry how many
+                  posts each one contributed, and spelling both out here wrapped
+                  the status line onto two rows. */}
+              {provenance.length ? (
                 <span style={{ color: "var(--gb-faint)" }}>
-                  {"  ·  "}
-                  {webSources.length}{" "}
-                  {webSources.length === 1 ? "article" : "articles"}
+                  {n.epistemic ? "  ·  " : null}
+                  {provenance.join("  ·  ")}
+                </span>
+              ) : null}
+              {/* The 8% the HUD admits to, said on the card that owes it.
+                  Same warn tone as an unverified citation chip because it is
+                  the same failure: something on screen that nothing backs. */}
+              {unsourced ? (
+                <span style={{ color: "var(--gb-warn)" }}>
+                  {n.epistemic ? "  ·  " : null}
+                  no sources
                 </span>
               ) : null}
             </div>
-          ) : null}
+          )}
 
           {!isOption && (shown.length || webSources.length) ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {shown.map((s) => (
-                <PostChip key={s.post.id} post={s.post} count={s.count} />
+                <PostChip key={s[0].id} posts={s} />
               ))}
               {/* The web sources a news card was actually built from. We
                   retrieve these, hand them to Grok and record them on the node
@@ -360,12 +477,7 @@ function BranchCardInner({
                 />
               ))}
               {sources.length > shown.length ? (
-                <span
-                  className="gb-label tabular-nums"
-                  style={{ color: "var(--gb-faint)", fontSize: "10.5px" }}
-                >
-                  +{sources.length - shown.length}
-                </span>
+                <MoreCitations posts={sources.slice(SOURCE_CAP).flat()} />
               ) : null}
             </div>
           ) : null}
@@ -380,7 +492,11 @@ function BranchCardInner({
               className="gb-pulse h-[4px] w-[4px] rounded-full"
               style={{ background: "var(--gb-live)" }}
             />
-            Grok expanding
+            {/* An ask doesn't expand, it goes and looks — and it takes longer
+                than a fork does because it may search several times. Saying
+                which is happening is the difference between waiting and
+                wondering whether it broke. */}
+            {isQuestion ? "Grok searching X and the web" : "Grok expanding"}
           </div>
         ) : null}
 
@@ -397,7 +513,7 @@ function BranchCardInner({
         {/* The forks are all claim-shaped — replies, counters, primary sources,
             falsifiers. None of them mean anything about a choice, so an options
             board simply doesn't offer them rather than offering dead buttons. */}
-        {selected && !pending && !isOption ? (
+        {selected && !pending && !isOption && !isQuestion ? (
           <div className="gb-attribution mt-3 flex flex-wrap gap-1.5">
             {forks.map((f) => (
               <button

@@ -8,6 +8,7 @@ import {
   getHomeTimeline,
   getPersonalizedTrends,
   searchRecent,
+  type XTrend,
 } from "@/lib/xClient";
 import { FIXTURE_BOARD } from "@/lib/fixtures";
 import type { Board, XPost } from "@/lib/schema";
@@ -62,6 +63,13 @@ export async function GET(req: Request) {
   let source = "fixtures";
   /** trending roots, merged in front of the clustered timeline topics */
   let trendBoard: Board | null = null;
+  /**
+   * Set only when an X read THREW. Never when it simply came back empty — the
+   * whole point of keeping these is that "X is down" and "your day was quiet"
+   * are different facts, and only one of them is about you.
+   */
+  let trendsError: string | undefined;
+  let xError: string | undefined;
 
   const token = await activeToken();
   if (token?.user_id) {
@@ -82,8 +90,21 @@ export async function GET(req: Request) {
          * news; the timeline fills any remaining slots with what your own
          * follow graph is actually discussing.
          */
+        /**
+         * A failed trends call is not an empty trending rail.
+         *
+         * Swallowed to [], a rate limit or an expired scope renders exactly
+         * like "nothing is trending for you today" — the board quietly drops
+         * to timeline-only roots and nobody ever learns the personalised half
+         * of the seed stopped working. Same failure the web search was
+         * hardened against; it just hadn't been applied here yet.
+         */
         const trends = await getPersonalizedTrends(token.access_token).catch(
-          () => [],
+          (err) => {
+            trendsError = err instanceof Error ? err.message : "trends failed";
+            console.error("[seed] trends FAILED (not empty):", err);
+            return [] as XTrend[];
+          },
         );
         const trendRoots = Math.min(trends.length, MAX_ROOTS - 1);
         if (trendRoots > 0) {
@@ -98,6 +119,7 @@ export async function GET(req: Request) {
         source = trendRoots > 0 ? "trends+timeline" : "x_home_timeline";
       }
     } catch (err) {
+      xError = err instanceof Error ? err.message : "X read failed";
       console.error("[seed] X read failed:", err);
     }
   }
@@ -128,9 +150,20 @@ export async function GET(req: Request) {
       };
     }
     setBoard(board);
-    // every successful live read becomes the next demo safety net
-    if (source === "x_home_timeline") await saveSnapshot(board, "latest");
-    return NextResponse.json({ board, source });
+    /**
+     * Every successful live read becomes the next demo safety net.
+     *
+     * This was gated on `x_home_timeline`, which is precisely the case where
+     * trends came back EMPTY — so on the normal path, the one everybody
+     * actually runs, the snapshot was never refreshed by the seed at all and
+     * the safety net quietly aged. A `?q=` board stays excluded on purpose:
+     * "latest" means your day, and a topic search answering to that name is
+     * the same mismatch snapshot.ts already refuses across kinds.
+     */
+    if (mode === "my_day" && !source.includes("fixtures")) {
+      await saveSnapshot(board, "latest");
+    }
+    return NextResponse.json({ board, source, trendsError, xError });
   } catch (err) {
     console.error("[seed] clustering failed:", err);
     setBoard(FIXTURE_BOARD);

@@ -44,6 +44,23 @@ export const XPostSchema = z.object({
   /** quote / reply / retweet parents, for thread expansion */
   referenced_post_ids: z.array(z.string()).optional(),
   /**
+   * The post this one quotes, when there is one.
+   *
+   * We already pay for the `referenced_tweets.id` expansion on every X call and
+   * used to drop the bodies on the floor — so a quote-tweet reached the board as
+   * bare commentary with the thing being commented on missing. "Exactly this"
+   * over a screenshot of a chart is not a claim until you can see the chart.
+   * One level only: the quote of a quote is someone else's argument.
+   */
+  quoted: z
+    .object({
+      id: z.string(),
+      text: z.string(),
+      author: XAuthorSchema,
+      url: z.string().optional(),
+    })
+    .optional(),
+  /**
    * True when this post came from Grok's x_search and we could NOT confirm it
    * exists via the X API. The text is then Grok's account of the post, not the
    * post. Rendered differently, never silently passed off as verified.
@@ -86,6 +103,21 @@ export const FORKS = [
   "people",
   "media",
   "falsifiers",
+  /**
+   * The user wrote the fork themselves.
+   *
+   * Every other entry here is a question we decided to offer. "ask" is the open
+   * slot in the same table — §5.1 already lists "what would change my mind?" as
+   * a fork, so a freeform question is the same shape with the intent supplied
+   * at runtime rather than baked in.
+   *
+   * The question is NOT carried on this enum's children as a field. It is the
+   * TITLE of the node they hang off: asking mints a real question node, so the
+   * question gets a card, a TOC row, a collapse state and its own citations for
+   * free, and two different questions can never collide in the expand cache the
+   * way two runs of one fork would.
+   */
+  "ask",
 ] as const;
 export const ForkSchema = z.enum(FORKS);
 export type Fork = z.infer<typeof ForkSchema>;
@@ -110,6 +142,43 @@ export const BranchNodeSchema = z.object({
   source_post_ids: z.array(z.string()),
   source_urls: z.array(z.string()).optional(),
   account_ids: z.array(z.string()).optional(),
+  /**
+   * Where this node came from, when what produced it was not a post we hold.
+   *
+   * A trending root is the case this exists for. X's trends API tells us a name
+   * and a post volume and gives us no post IDs at all, so the node was built
+   * with `source_post_ids: []` — and then rendered the red "no sources" marker,
+   * on the single most prominent card on the board, for something X itself
+   * handed us. That marker means "nothing backs this", which was false: X's
+   * trend service backs it, and said how loudly.
+   *
+   * This is provenance, not a citation, and the distinction is load-bearing.
+   * It grounds the HEADLINE — "X says this is trending, with N posts" — and
+   * nothing more. It is deliberately not enough to support a body making a
+   * claim; that still needs posts or reporting, which is why `rollUpCitations`
+   * still runs and why the grounding search still fires on expand.
+   */
+  origin: z
+    .object({
+      kind: z.literal("x_trend"),
+      /** the trend name exactly as X gave it */
+      label: z.string(),
+      /** X's own volume for the trend, already parsed from "5.7K posts" */
+      postCount: z.number().optional(),
+      category: z.string().optional(),
+      /**
+       * Deliberately no URL.
+       *
+       * The obvious move is to link the chip at x.com/search?q=<the trend>, and
+       * it's wrong: trend names are synthesised summaries that never appear
+       * verbatim in posts (see searchQueryFor), so that link lands on an empty
+       * X page dressed as a source. A provenance marker you can't check beats
+       * one that pretends to be checkable. The checkable version arrives on its
+       * own a moment later — the grounding search rolls real post chips onto
+       * this node, and those are better evidence than any search link.
+       */
+    })
+    .optional(),
 
   // state
   has_children: z.boolean(),
@@ -176,6 +245,16 @@ export interface Board {
    * Everything else — layout, zoom, bands, novelty, recursion — is identical.
    */
   kind?: "news" | "options";
+  /**
+   * For options boards: the dimension the ROOT column was divided along.
+   *
+   * A node stores the axis its own children were split by, but the roots have
+   * no node above them — the question does, and the question isn't a card. So
+   * the board holds it. Without this, "more directions" is asked to continue a
+   * division nobody told it about, and it re-divides the space along whatever
+   * axis it infers from three titles, which is how you get synonyms.
+   */
+  axis?: string;
   seed: {
     mode: "my_day" | "trending" | "search" | "post" | "handle";
     label: string;

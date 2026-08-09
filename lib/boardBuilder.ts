@@ -104,6 +104,22 @@ export function buildBoardFromTrends(
       generality: 1,
       depth: 0,
       source_post_ids: [],
+      /**
+       * X IS the source here, and until now we threw that away.
+       *
+       * The citations arrive on expand (see rollUpCitations), but between the
+       * board painting and that landing, a bare `source_post_ids: []` made
+       * `isGrounded` false and the card printed the red "no sources" marker —
+       * on a headline X had just handed us, complete with its volume. Recording
+       * the trend says the true thing instead: this came from X's trends, and
+       * this is how loud it is.
+       */
+      origin: {
+        kind: "x_trend" as const,
+        label: trend.name,
+        postCount: trend.postCount,
+        category: trend.category,
+      },
       has_children: true,
       unread_depth: true,
       heat: trend.postCount / busiest,
@@ -219,17 +235,32 @@ export function childrenToNodes(
  */
 const PLACEHOLDER = /^(n\/?a|not listed|not (?:yet )?(?:available|announced|specified)|unknown|tbd|varies|—|-)$/i;
 
-function discriminating(raw: OptionChild[]) {
+function discriminating(
+  raw: OptionChild[],
+  /**
+   * Cards that will sit BESIDE these in the same column, when this batch is
+   * extending a set rather than creating one.
+   *
+   * "Reads the same on all three cards" was measured against the incoming batch
+   * alone, so a batch of one skipped the check entirely — and "more directions"
+   * routinely returns one. The column is what the reader compares, so the
+   * column is what the value has to differ across.
+   */
+  siblings: Pick<BranchNode, "attributes">[] = [],
+) {
   const options = raw.map((o) => ({
     ...o,
     attributes: (o.attributes ?? []).filter((a) => !PLACEHOLDER.test(a.value.trim())),
   }));
-  if (options.length < 2) return options;
+  const cohort = [...options, ...siblings];
+  if (cohort.length < 2) return options;
   const norm = (v: string) => v.trim().toLowerCase();
   const dead = new Set<string>();
 
+  // only labels this batch actually carries are up for removal; the cards
+  // already on the board are evidence, not candidates
   for (const label of new Set(options.flatMap((o) => o.attributes?.map((a) => a.label) ?? []))) {
-    const values = options.map((o) => o.attributes?.find((a) => a.label === label)?.value);
+    const values = cohort.map((o) => o.attributes?.find((a) => a.label === label)?.value);
     // only judge a label every option carries; a partial row is already
     // information ("only this one has a tow rating")
     if (values.some((v) => v === undefined)) continue;
@@ -248,8 +279,10 @@ export function optionsToNodes(
   parent: BranchNode,
   rawOptions: OptionChild[],
   web: WebSource[],
+  /** cards already in this column, when this batch is extending it */
+  siblings: Pick<BranchNode, "attributes">[] = [],
 ): BranchNode[] {
-  const options = discriminating(rawOptions);
+  const options = discriminating(rawOptions, siblings);
   const now = new Date().toISOString();
   return options.map((o) => {
     const id = newId("o");
@@ -297,6 +330,52 @@ export function optionsToNodes(
       updated_at: now,
     };
   });
+}
+
+/**
+ * The question, as a parent.
+ *
+ * The first split and every later "more directions" are the SAME call as an
+ * ordinary expand — a node in, more specific children out. What they lack is a
+ * node: the thing being divided is the question, and the question is never a
+ * card. So it gets a fixture, which exists purely for wiring and never renders.
+ *
+ * Shared by both paths deliberately. When roots/more built its own from
+ * `{ ...board.nodes[root_ids[0]] }` it inherited a real option's title, body,
+ * attributes and image prompt as the parent of the next batch — and produced
+ * nothing at all when the server didn't happen to hold that board.
+ */
+export function rootOptions(
+  question: string,
+  options: OptionChild[],
+  web: WebSource[],
+  /** roots already on the board, when this batch is extending the column */
+  siblings: Pick<BranchNode, "attributes">[] = [],
+): BranchNode[] {
+  const now = new Date().toISOString();
+  const seed: BranchNode = {
+    id: "__seed",
+    type: "option",
+    title: question,
+    parent_id: null,
+    children_ids: [],
+    priority: 1,
+    generality: 1,
+    depth: -1,
+    source_post_ids: [],
+    has_children: true,
+    created_at: now,
+    updated_at: now,
+  };
+  // roots sit at depth 0 / generality 1 whether they arrived in the first batch
+  // or the fourth, so the column reads as one list rather than as generations
+  return optionsToNodes(seed, options, web, siblings).map((n) => ({
+    ...n,
+    parent_id: null,
+    depth: 0,
+    generality: 1,
+    axis: undefined,
+  }));
 }
 
 /**

@@ -158,7 +158,15 @@ export async function readToken(): Promise<XToken | null> {
   try {
     const jar = await cookies();
     const raw = jar.get(COOKIE)?.value;
-    if (raw) return JSON.parse(raw) as XToken;
+    if (raw) {
+      const token = JSON.parse(raw) as XToken;
+      // Mirror on every cookie read, not just on login. An already-connected
+      // user with a valid token never hits storeToken or the refresh path, so
+      // the disk copy would otherwise never be written and nothing
+      // server-side could authenticate.
+      void mirrorToDisk(token);
+      return token;
+    }
   } catch {
     /* no request context (background job) — fall through to disk */
   }

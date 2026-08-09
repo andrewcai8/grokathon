@@ -262,7 +262,9 @@ export async function POST(req: Request) {
       newPosts = { ...newPosts, ...verified };
       summary = out.summary;
     } else {
-      raw = await expandNode(node, fork, corpus, ancestors, covered.titles);
+      const out = await expandNode(node, fork, corpus, ancestors, covered.titles);
+      raw = out.children;
+      summary = out.summary;
     }
 
     const postsForCitations = { ...board.posts, ...newPosts };
@@ -327,7 +329,9 @@ export async function POST(req: Request) {
       posts: newPosts,
       fork,
       summary,
-      source: useXSearch ? "x_search" : "timeline",
+      // distinguish posts we just fetched from X for this node from ones that
+      // were already in the board's corpus
+      source: useXSearch ? "x_search" : groundedNow ? "x_grounded" : "timeline",
     });
   } catch (err) {
     console.error("[expand]", err);

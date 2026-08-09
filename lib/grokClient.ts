@@ -268,10 +268,15 @@ export async function expandNode(
   ancestors: string[] = [],
   /** titles already on the board — children must not restate any of them */
   covered: string[] = [],
-): Promise<GrokChild[]> {
+): Promise<{ children: GrokChild[]; summary?: string }> {
   const schema = {
     type: "object",
     properties: {
+      summary: {
+        type: "string",
+        description:
+          "2-3 sentences on what this story actually is, strictly from the posts supplied. Becomes this card's body. Say only what the posts support.",
+      },
       children: {
         type: "array",
         minItems: 1,
@@ -279,11 +284,11 @@ export async function expandNode(
         items: childSchema(),
       },
     },
-    required: ["children"],
+    required: ["summary", "children"],
     additionalProperties: false,
   };
 
-  const content = `Expand this node into AT MOST ${MAX_CHILDREN} children.
+  const content = `Expand this node into AT MOST ${MAX_CHILDREN} children, and write a short summary of what this story is.
 
 Return only the most load-bearing ones — the children that would change how I
 understand this if I read them. Fewer, sharper children beat more shallow ones.
@@ -305,15 +310,19 @@ Every claim that has evidence in the corpus must cite its post IDs. The posts be
 AVAILABLE POSTS:
 ${posts.map(postLine).join("\n\n")}`;
 
-  const out = await structured("expand_children", schema, content, (raw) =>
-    GrokExpandSchema.parse(raw),
-  );
+  const out = await structured("expand_children", schema, content, (raw) => ({
+    ...GrokExpandSchema.parse(raw),
+    summary: (raw as { summary?: string })?.summary,
+  }));
   // The json_schema already caps this, but parse stays deliberately tolerant so
   // an over-eager generation gets trimmed rather than throwing mid-demo. Keep
   // the highest-priority ones.
-  return [...out.children]
-    .sort((a, b) => b.priority - a.priority)
-    .slice(0, MAX_CHILDREN);
+  return {
+    children: [...out.children]
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, MAX_CHILDREN),
+    summary: out.summary,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,39 @@ export function SeedBar({
   const [me, setMe] = useState<Me | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [question, setQuestion] = useState("");
+
+  /**
+   * The other kind of board.
+   *
+   * Same surface, same zoom, same recursion — it just narrows instead of
+   * evidencing. Starting one is a sentence rather than a mode switch, because
+   * the decision the user has in mind IS the seed, and asking them to pick
+   * "options mode" first would make them describe it twice.
+   */
+  const narrow = async () => {
+    const prompt = question.trim();
+    if (!prompt) return;
+    setBusy("narrow");
+    setError(null);
+    try {
+      const res = await fetch("/api/board/options", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.board?.root_ids?.length) {
+        setError(data?.error ?? "could not build that board");
+      } else {
+        onBoard(data.board);
+      }
+    } catch {
+      setError("request failed");
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     fetch("/api/me")
@@ -129,6 +162,46 @@ export function SeedBar({
           onMouseLeave={hoverOff}
         >
           {busy === "snap" ? "Loading…" : "◧ Load snapshot"}
+        </button>
+      </div>
+
+      <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--gb-line)" }}>
+        <div className="gb-label mb-2" style={{ color: "var(--gb-faint)" }}>
+          Narrow it down
+        </div>
+        <input
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void narrow();
+          }}
+          disabled={Boolean(busy)}
+          placeholder="help me pick a car under $30k"
+          className="gb-label w-full border px-2.5 py-[9px] outline-none transition-colors disabled:opacity-40"
+          style={{
+            borderColor: "var(--gb-line)",
+            color: "var(--gb-text)",
+            background: "transparent",
+            borderRadius: 2,
+            textTransform: "none",
+            letterSpacing: "0.01em",
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = "var(--gb-line-max)";
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = "var(--gb-line)";
+          }}
+        />
+        <button
+          onClick={() => void narrow()}
+          disabled={Boolean(busy) || !question.trim()}
+          className={`${action} mt-1.5`}
+          style={actionStyle}
+          onMouseEnter={hoverOn}
+          onMouseLeave={hoverOff}
+        >
+          {busy === "narrow" ? "Searching the web…" : "→ Give me three options"}
         </button>
       </div>
 

@@ -57,6 +57,8 @@ export const NODE_TYPES = [
   "media",
   "fork",
   "generated",
+  /** a choice on an options board — not true or false, so never an assertion */
+  "option",
 ] as const;
 export const NodeTypeSchema = z.enum(NODE_TYPES);
 export type NodeType = z.infer<typeof NodeTypeSchema>;
@@ -120,6 +122,13 @@ export const BranchNodeSchema = z.object({
    * of citations and an epistemic status.
    */
   attributes: z.array(z.object({ label: z.string(), value: z.string() })).optional(),
+  /**
+   * For option nodes: the dimension this node's CHILDREN were divided along
+   * ("body style", "trip length"). Naming the axis is what forces three
+   * different directions instead of three samples of one, so showing it is
+   * also how the user can tell whether the branching was any good.
+   */
+  axis: z.string().optional(),
   /** web sources behind this node, for boards not grounded in X posts */
   source_urls_meta: z
     .array(

@@ -281,6 +281,7 @@ export function ZoomSurface() {
   const requestExpand = useCallback(
     (id: string, fork: string, append: boolean) => {
       const s = useBoard.getState();
+      const startedAt = performance.now();
       s.setPending(id, true);
       // skeletons are laid out on this same frame — show them straight away
       requestAnimationFrame(() => revealChildColumnOf(id));
@@ -294,6 +295,8 @@ export function ZoomSurface() {
           node: s.board?.nodes[id],
           ancestors: ancestorsOf(s.board, id),
           posts: s.board?.posts,
+          // ...and what the board is FOR, for exactly the same reason
+          kind: s.board?.kind,
         }),
       })
         .then(async (r) => {
@@ -306,15 +309,35 @@ export function ZoomSurface() {
             throw new Error("Grok returned nothing for this branch");
           }
           useBoard.getState().setError(id, null);
-          useBoard.getState().mergeChildren(id, data.children, data.posts, append, data.summary);
+          useBoard.getState().record({
+            kind: "expand",
+            source: data.source ?? (data.cached ? "cache" : undefined),
+            ms: Math.round(performance.now() - startedAt),
+            posts: Object.keys(data.posts ?? {}).length,
+            web: (data.children ?? []).reduce(
+              (n: number, c: { source_urls_meta?: unknown[] }) =>
+                n + (c.source_urls_meta?.length ?? 0),
+              0,
+            ),
+            cached: Boolean(data.cached),
+            at: Date.now(),
+          });
+          useBoard
+            .getState()
+            .mergeChildren(id, data.children, data.posts, append, data.summary, data.axis);
           useBoard.getState().expand(id);
           requestAnimationFrame(() => revealColumn(data.children[0].id));
         })
         .catch((err: unknown) => {
           // a silent failure is indistinguishable from a dead card — say it
-          useBoard
-            .getState()
-            .setError(id, err instanceof Error ? err.message : "expand failed");
+          const message = err instanceof Error ? err.message : "expand failed";
+          useBoard.getState().setError(id, message);
+          useBoard.getState().record({
+            kind: "expand",
+            ms: Math.round(performance.now() - startedAt),
+            error: message,
+            at: Date.now(),
+          });
         })
         .finally(() => useBoard.getState().setPending(id, false));
     },

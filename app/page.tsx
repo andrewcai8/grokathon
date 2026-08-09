@@ -6,6 +6,7 @@ import { useBoard } from "@/lib/store";
 import { TocRail } from "@/components/TocRail";
 import { ZoomSurface } from "@/components/ZoomSurface";
 import { SeedBar } from "@/components/SeedBar";
+import { StatsHud } from "@/components/StatsHud";
 import type { Board } from "@/lib/schema";
 
 /**
@@ -112,24 +113,7 @@ export default function Home() {
         />
       )}
       <ZoomSurface />
-      {board?.seed.snapshot ? (
-        <div
-          className="gb-label pointer-events-none absolute right-5 top-5 flex items-center gap-2 border px-2.5 py-[7px]"
-          style={{
-            borderColor: "var(--gb-line)",
-            color: "var(--gb-dim)",
-            background: "rgba(0,0,0,0.6)",
-            borderRadius: 2,
-            backdropFilter: "blur(8px)",
-          }}
-        >
-          <span
-            className="h-[5px] w-[5px] rounded-full"
-            style={{ background: "var(--gb-faint)" }}
-          />
-          Snapshot
-        </div>
-      ) : null}
+      <StatsHud />
     </main>
   );
 }

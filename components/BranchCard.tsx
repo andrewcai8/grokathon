@@ -3,8 +3,11 @@
 import { memo, useEffect, useRef } from "react";
 import type { PositionedCard } from "@/lib/layout";
 import type { Board, Fork, XPost } from "@/lib/schema";
+import { isContestable } from "@/lib/evidence";
 import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight } from "@/lib/store";
+import { OptionImage } from "./OptionImage";
 import { PostChip } from "./PostChip";
+import { SourceChip } from "./SourceChip";
 
 /**
  * Colour is the epistemic channel and nothing else. On a black board the only
@@ -86,6 +89,17 @@ function BranchCardInner({
   const shown = sources.slice(0, SOURCE_CAP);
   const innerRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * What KIND of thing this card is — the one branch in the whole component.
+   *
+   * A claim is true or false, so it earns citations and an epistemic status. An
+   * option is a choice: it has attributes and a price, "contested" is a
+   * category error, and a post chip is the wrong rendering because you want to
+   * see the thing rather than who said it.
+   */
+  const isOption = !isContestable(board.kind);
+  const webSources = n.source_urls_meta ?? [];
+
   // measure the content, not the card — the card's own height comes FROM this
   useEffect(() => {
     const el = innerRef.current;
@@ -142,6 +156,13 @@ function BranchCardInner({
           <span className="tabular-nums">{n.generality.toFixed(2)}</span>
         </div>
 
+        {/* On an options board the picture IS the card — you're choosing
+            between things, and seeing them beats reading about them. It sits
+            above the title so the column reads as a row of choices. */}
+        {isOption ? (
+          <OptionImage nodeId={n.id} prompt={n.media?.alt} url={n.media?.url} />
+        ) : null}
+
         <h3
           className="gb-title text-[17px] leading-[1.3] tracking-[-0.014em]"
           style={{
@@ -167,12 +188,80 @@ function BranchCardInner({
           </p>
         ) : null}
 
+        {/* The dimension the children divide this along. Naming it is what
+            forces three different directions instead of three samples of one,
+            so showing it is how you can tell whether the branching was any
+            good — and it makes the next click legible before you make it. */}
+        {isOption && n.axis ? (
+          <div
+            className="gb-attribution gb-label mt-2.5"
+            style={{ color: "var(--gb-faint)", fontSize: "10.5px" }}
+          >
+            ↳ by {n.axis}
+          </div>
+        ) : null}
+
         {/* Status gets its own line so the citations get the card's full width.
             They used to share one clipped row, which meant a claim corroborated
             by six accounts displayed exactly like a claim from one — the single
             most important thing the epistemic layer has to distinguish. */}
+        {/*
+          Attributes are to an option what citations are to a claim: the thing
+          that makes it decidable rather than a nice sentence. Laid out as
+          aligned rows so three siblings can be read DOWN a column against each
+          other — the comparison is the point, and it only works if "Price"
+          sits at the same height on all three.
+        */}
+        {isOption && n.attributes?.length ? (
+          <dl
+            className="gb-attribution mt-3 border-t pt-2.5"
+            style={{ borderColor: "var(--gb-line)" }}
+          >
+            {n.attributes.map((a) => (
+              <div key={a.label} className="flex items-baseline gap-2 py-[3px]">
+                <dt
+                  className="gb-label shrink-0"
+                  style={{ color: "var(--gb-faint)", fontSize: "10.5px" }}
+                >
+                  {a.label}
+                </dt>
+                <span
+                  className="h-px min-w-2 flex-1 translate-y-[-2px]"
+                  style={{ background: "var(--gb-line)" }}
+                />
+                <dd
+                  className="gb-label tabular-nums"
+                  style={{
+                    color: "var(--gb-text)",
+                    fontSize: "11.5px",
+                    textTransform: "none",
+                  }}
+                >
+                  {a.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+
         <div className="gb-attribution mt-3.5">
-          {n.epistemic ? (
+          {/* Where the attributes were read from. No epistemic status: an
+              option isn't true or false, and labelling a hatchback "contested"
+              is the category error this whole split exists to prevent. */}
+          {isOption ? (
+            webSources.length ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {webSources.slice(0, SOURCE_CAP).map((w) => (
+                  <SourceChip
+                    key={w.url}
+                    url={w.url}
+                    title={w.title}
+                    siteName={w.siteName}
+                  />
+                ))}
+              </div>
+            ) : null
+          ) : n.epistemic ? (
             <div
               className="gb-label"
               style={{
@@ -193,7 +282,7 @@ function BranchCardInner({
             </div>
           ) : null}
 
-          {shown.length ? (
+          {!isOption && shown.length ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {shown.map((s) => (
                 <PostChip key={s.post.id} post={s.post} count={s.count} />
@@ -233,7 +322,10 @@ function BranchCardInner({
           </div>
         ) : null}
 
-        {selected && !pending ? (
+        {/* The forks are all claim-shaped — replies, counters, primary sources,
+            falsifiers. None of them mean anything about a choice, so an options
+            board simply doesn't offer them rather than offering dead buttons. */}
+        {selected && !pending && !isOption ? (
           <div className="gb-attribution mt-3 flex flex-wrap gap-1.5">
             {QUICK_FORKS.map((f) => (
               <button

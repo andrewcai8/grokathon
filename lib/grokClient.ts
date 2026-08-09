@@ -169,11 +169,18 @@ function postLine(p: XPost) {
   return `id:${p.id} @${p.author.handle} (${p.author.name})${m}\n${p.text}`;
 }
 
-async function structured<T>(
+export async function structured<T>(
   name: string,
   schema: Record<string, unknown>,
   userContent: string,
   parse: (raw: unknown) => T,
+  /**
+   * Defaults to the news system prompt. The options board passes its own: an
+   * option is not a claim, so the epistemic rules that make news honest are a
+   * category error there and telling the model to apply them produces
+   * "contested" hatchbacks.
+   */
+  system: string = SYSTEM,
 ): Promise<T> {
   const res = await grok().chat.completions.create({
     model: GROK_MODEL,
@@ -183,7 +190,7 @@ async function structured<T>(
     // problem, and latency IS the product here.
     reasoning_effort: REASONING_EFFORT as "low" | "medium" | "high",
     messages: [
-      { role: "system", content: SYSTEM },
+      { role: "system", content: system },
       { role: "user", content: userContent },
     ],
     response_format: {

@@ -45,3 +45,7 @@ next-env.d.ts
 
 # OAuth token mirrored for server-side/background use
 .auth/
+
+# generated option-card images, cached by prompt hash ($0.05 each, so kept
+# across restarts — but they're reproducible, not source)
+/public/gb-images/

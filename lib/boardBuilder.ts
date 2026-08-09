@@ -1,4 +1,6 @@
 import type { Board, BranchNode, Fork, GrokChild, GrokCluster, XPost } from "./schema";
+import type { WebSource } from "./evidence";
+import type { OptionChild } from "./optionsExpander";
 import type { XTrend } from "./xClient";
 
 /**
@@ -180,6 +182,112 @@ export function childrenToNodes(
 }
 
 /**
+ * Options -> nodes. Same split as childrenToNodes: the model invented the
+ * meaning, we assign identity, wiring and depth.
+ *
+ * Three differences from a claim, all of them the point of the exercise:
+ * no epistemic status (an option is not true or false), attributes instead of
+ * citations as the thing you read, and a pending image request expressed as
+ * media with a prompt but no url yet — the card asks for its own picture, so
+ * the column lands instantly and fills in.
+ */
+/**
+ * Drop attributes that don't discriminate.
+ *
+ * An attribute whose value reads the same on all three cards tells you nothing
+ * — it's usually the constraint restated ("Price band: under $30,000" inside a
+ * search for cars under $30,000), which costs a row and buys no decision.
+ *
+ * The prompt asks for this and the model still does it, which is the same
+ * lesson novelty taught: if correctness depends on the model REMEMBERING a
+ * rule, it will eventually forget. So it's enforced here instead — a
+ * non-discriminating attribute cannot reach a card.
+ */
+/**
+ * A placeholder is not a value.
+ *
+ * Told to keep labels identical across siblings, the model pads the gaps with
+ * "Not listed" rather than dropping the row — so an option the sources are thin
+ * on renders as a card of blanks and reads as broken rather than as sparse.
+ * Omitting the row says the same thing and costs no space; a partial row is
+ * itself information, which is why the check below tolerates one.
+ */
+const PLACEHOLDER = /^(n\/?a|not listed|not (?:yet )?(?:available|announced|specified)|unknown|tbd|varies|—|-)$/i;
+
+function discriminating(raw: OptionChild[]) {
+  const options = raw.map((o) => ({
+    ...o,
+    attributes: (o.attributes ?? []).filter((a) => !PLACEHOLDER.test(a.value.trim())),
+  }));
+  if (options.length < 2) return options;
+  const norm = (v: string) => v.trim().toLowerCase();
+  const dead = new Set<string>();
+
+  for (const label of new Set(options.flatMap((o) => o.attributes?.map((a) => a.label) ?? []))) {
+    const values = options.map((o) => o.attributes?.find((a) => a.label === label)?.value);
+    // only judge a label every option carries; a partial row is already
+    // information ("only this one has a tow rating")
+    if (values.some((v) => v === undefined)) continue;
+    if (new Set(values.map((v) => norm(v!))).size === 1) dead.add(label);
+  }
+
+  if (!dead.size) return options;
+  console.log("[options] dropped non-discriminating attributes: %s", [...dead].join(", "));
+  return options.map((o) => ({
+    ...o,
+    attributes: (o.attributes ?? []).filter((a) => !dead.has(a.label)),
+  }));
+}
+
+export function optionsToNodes(
+  parent: BranchNode,
+  rawOptions: OptionChild[],
+  web: WebSource[],
+): BranchNode[] {
+  const options = discriminating(rawOptions);
+  const now = new Date().toISOString();
+  return options.map((o) => {
+    const id = newId("o");
+    // refs come back as "web3"; resolve against the corpus we actually
+    // retrieved, and drop anything that doesn't resolve rather than rendering
+    // a source we can't stand behind
+    const cited = (o.source_web_ids ?? [])
+      .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
+      .filter(Boolean);
+
+    return {
+      id,
+      type: "option" as const,
+      title: o.title,
+      body: o.body,
+      parent_id: parent.id,
+      children_ids: [],
+      priority: o.priority ?? 0.5,
+      generality: Math.max(0, parent.generality - 0.15),
+      depth: parent.depth + 1,
+      // options aren't grounded in X posts; their grounding is the pages the
+      // attributes were read out of
+      source_post_ids: [],
+      source_urls_meta: cited.map((w) => ({
+        url: w.url,
+        title: w.title,
+        siteName: w.siteName,
+      })),
+      attributes: o.attributes?.filter((a) => a.label && a.value) ?? [],
+      // the board recurses indefinitely — see childrenToNodes. Grok's own
+      // signal becomes the unread hint, not a locked door.
+      has_children: true,
+      unread_depth: o.has_children,
+      media: o.image_prompt
+        ? { kind: "generated_image" as const, alt: o.image_prompt }
+        : undefined,
+      created_at: now,
+      updated_at: now,
+    };
+  });
+}
+
+/**
  * Everything the board has ALREADY said.
  *
  * Depth has to pay for itself. Someone expands a node because they're curious
@@ -193,15 +301,20 @@ export function childrenToNodes(
 export function coveredGround(
   board: Board,
   excludeNodeId?: string,
-): { postIds: Set<string>; titles: string[] } {
+): { postIds: Set<string>; urls: Set<string>; titles: string[] } {
   const postIds = new Set<string>();
+  // web sources get the same treatment as posts: an options board that keeps
+  // re-reading the same buying guide produces the same three cars three levels
+  // running, which is the exact failure the post rule was written to stop
+  const urls = new Set<string>();
   const titles: string[] = [];
   for (const n of Object.values(board.nodes)) {
     if (n.id === excludeNodeId) continue;
     for (const id of n.source_post_ids) postIds.add(id);
+    for (const w of n.source_urls_meta ?? []) urls.add(w.url);
     titles.push(n.title);
   }
-  return { postIds, titles };
+  return { postIds, urls, titles };
 }
 
 /**

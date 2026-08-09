@@ -13,9 +13,12 @@ import {
   childrenToNodes,
   citedPosts,
   coveredGround,
+  optionsToNodes,
   relevantPosts,
   rollUpCitations,
 } from "@/lib/boardBuilder";
+import { expandOptions, optionCorpus } from "@/lib/optionsExpander";
+import type { BoardKind } from "@/lib/evidence";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
 import { getPostsByIds, getReplies, searchRecent } from "@/lib/xClient";
@@ -100,6 +103,8 @@ export async function POST(req: Request) {
     node?: BranchNode;
     ancestors?: string[];
     posts?: Record<string, XPost>;
+    /** what the client's board is FOR, for the same reason it sends the node */
+    kind?: BoardKind;
   };
   const nodeId = body.nodeId;
   if (!nodeId) {
@@ -131,7 +136,12 @@ export async function POST(req: Request) {
         // that board, and borrowing its corpus made ungrounded nodes look
         // grounded, which routed bare headlines away from x_search
         posts: body.posts ?? {},
+        kind: body.kind,
       };
+
+  // The server's board wins when it owns the node, for the same reason it wins
+  // on the graph; otherwise trust what the client says its board is for.
+  const kind: BoardKind = board.kind ?? body.kind ?? "news";
 
   // Already expanded on this fork — serve from the graph, instantly.
   //
@@ -155,6 +165,88 @@ export async function POST(req: Request) {
       fork,
       cached: true,
     });
+  }
+
+  /**
+   * An options board narrows instead of evidencing.
+   *
+   * Same seam as replies: a node in, at most N more specific children out, one
+   * grounding type. Everything the board does around this call — layout, zoom,
+   * bands, the novelty rule, infinite recursion — is untouched and shared. Only
+   * retrieval and what a child MEANS differ, which is the whole claim of the
+   * paradigm.
+   */
+  if (kind === "options") {
+    if (!hasGrok()) {
+      return NextResponse.json({ error: "XAI_API_KEY not set" }, { status: 503 });
+    }
+    if (!hasExa()) {
+      return NextResponse.json({ error: "EXA_API_KEY not set" }, { status: 503 });
+    }
+    try {
+      const covered = coveredGround(board, nodeId);
+      const ancestors = serverBoard?.nodes[nodeId]
+        ? ancestorTitles(board, nodeId)
+        : (body.ancestors ?? []);
+
+      // sources already used on this board are removed before the model sees
+      // them — structural novelty, exactly as posts are for news
+      const { web, query } = await optionCorpus(node.title, ancestors, covered.urls);
+      if (!web.length) {
+        return NextResponse.json(
+          { error: `nothing new found for "${query}"` },
+          { status: 404 },
+        );
+      }
+
+      const { options, summary, axis } = await expandOptions(
+        node,
+        ancestors,
+        covered.titles,
+        web,
+      );
+      if (!options.length) {
+        return NextResponse.json({ error: "no options returned" }, { status: 502 });
+      }
+
+      const children = optionsToNodes(node, options, web);
+
+      if (serverBoard?.nodes[nodeId]) patchBoard((b) => {
+        const prev = b.nodes[nodeId];
+        if (!prev) return b;
+        const nodes = { ...b.nodes };
+        for (const c of children) nodes[c.id] = c;
+        nodes[nodeId] = {
+          ...prev,
+          children_ids: children.map((c) => c.id),
+          body: prev.body || summary,
+          axis: axis ?? prev.axis,
+          has_children: true,
+          updated_at: new Date().toISOString(),
+        };
+        return { ...b, nodes };
+      });
+
+      after(() => persistWarmedBoard(getBoard()));
+      console.log(
+        "[expand/options] %s -> %s -> %d options (axis: %s)",
+        node.title, query, children.length, axis ?? "none",
+      );
+      return NextResponse.json({
+        children,
+        posts: {},
+        fork: "deeper",
+        summary,
+        axis,
+        source: "web",
+      });
+    } catch (err) {
+      console.error("[expand/options]", err);
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "options expand failed" },
+        { status: 500 },
+      );
+    }
   }
 
   /**

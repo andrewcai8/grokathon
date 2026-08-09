@@ -28,12 +28,20 @@ interface BoardState {
     posts?: Board["posts"],
     append?: boolean,
     summary?: string,
+    /** the dimension these children divide the parent along (options boards) */
+    axis?: string,
   ) => void;
+  /** a card generated its own picture — record it so it isn't fetched twice */
+  setMedia: (nodeId: string, url: string) => void;
 
   toggle: (id: string) => void;
   expand: (id: string) => void;
   collapse: (id: string) => void;
   setPending: (id: string, on: boolean) => void;
+  /** session telemetry — every retrieval, what it cost, where it came from */
+  events: BoardEvent[];
+  record: (e: BoardEvent) => void;
+
   /** loading more roots — the root column extends downward */
   loadingRoots: boolean;
   setLoadingRoots: (on: boolean) => void;
@@ -102,6 +110,29 @@ export function reportHeight(id: string, h: number) {
   });
 }
 
+/**
+ * One retrieval, as it happened.
+ *
+ * The board already produces this signal on every call — which source answered,
+ * how long it took, how many citations survived — and then drops it. Surfacing
+ * it turns the demo from "trust me, it's grounded" into something a judge can
+ * watch: you can SEE that a card came from the X API in 3s and cited four real
+ * posts, rather than being told so.
+ */
+export interface BoardEvent {
+  kind: "seed" | "expand" | "roots";
+  /** which retrieval answered: x_grounded, x_search, x_replies, timeline… */
+  source?: string;
+  ms: number;
+  /** X posts attached to the result */
+  posts?: number;
+  /** web sources attached */
+  web?: number;
+  cached?: boolean;
+  error?: string;
+  at: number;
+}
+
 export const useBoard = create<BoardState>((set, get) => ({
   board: null,
   layout: null,
@@ -110,6 +141,7 @@ export const useBoard = create<BoardState>((set, get) => ({
   hoveredId: null,
   selectedId: null,
   errors: {},
+  events: [],
   loadingRoots: false,
   rootsExhausted: false,
 
@@ -123,7 +155,18 @@ export const useBoard = create<BoardState>((set, get) => ({
     set({ board, expanded, pending, layout: relayout(board, expanded, pending) });
   },
 
-  mergeChildren: (parentId, children, posts, append = false, summary) => {
+  setMedia: (nodeId, url) => {
+    const { board, expanded, pending } = get();
+    const node = board?.nodes[nodeId];
+    if (!board || !node?.media) return;
+    const next: Board = {
+      ...board,
+      nodes: { ...board.nodes, [nodeId]: { ...node, media: { ...node.media, url } } },
+    };
+    set({ board: next, layout: relayout(next, expanded, pending) });
+  },
+
+  mergeChildren: (parentId, children, posts, append = false, summary, axis) => {
     const { board, expanded } = get();
     if (!board) return;
 
@@ -142,6 +185,7 @@ export const useBoard = create<BoardState>((set, get) => ({
           ? [...parent.children_ids, ...children.map((c) => c.id)]
           : children.map((c) => c.id),
         body: parent.body || summary,
+        axis: axis ?? parent.axis,
         has_children: true,
         updated_at: new Date().toISOString(),
       },
@@ -198,6 +242,8 @@ export const useBoard = create<BoardState>((set, get) => ({
     else delete errors[id];
     set({ errors });
   },
+
+  record: (e) => set({ events: [...get().events, e].slice(-60) }),
 
   setLoadingRoots: (loadingRoots) => set({ loadingRoots }),
 

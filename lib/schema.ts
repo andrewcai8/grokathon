@@ -114,6 +114,23 @@ export const BranchNodeSchema = z.object({
   /** which fork produced this node, if not the default "deeper" */
   fork: ForkSchema.optional(),
 
+  /**
+   * For option nodes: the attributes that make this a real choice (price,
+   * size, range). Options aren't true or false, so they carry these instead
+   * of citations and an epistemic status.
+   */
+  attributes: z.array(z.object({ label: z.string(), value: z.string() })).optional(),
+  /** web sources behind this node, for boards not grounded in X posts */
+  source_urls_meta: z
+    .array(
+      z.object({
+        url: z.string(),
+        title: z.string(),
+        siteName: z.string().optional(),
+      }),
+    )
+    .optional(),
+
   media: z
     .object({
       kind: z.enum(["image", "video", "generated_image", "generated_video"]),
@@ -131,6 +148,12 @@ export type BranchNode = z.infer<typeof BranchNodeSchema>;
 export interface Board {
   /** boards are rooted on a date, not a topic (doc §3.3) */
   date: string;
+  /**
+   * What this board is for. "news" asserts things that can be false and needs
+   * citations; "options" presents choices, which carry attributes instead.
+   * Everything else — layout, zoom, bands, novelty, recursion — is identical.
+   */
+  kind?: "news" | "options";
   seed: {
     mode: "my_day" | "trending" | "search" | "post" | "handle";
     label: string;

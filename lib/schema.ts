@@ -136,6 +136,10 @@ export interface Board {
     label: string;
     /** set when this board came off disk rather than a live read */
     snapshot?: boolean;
+    /** which snapshot file this board came from, so warming writes back to it */
+    name?: string;
+    /** synthetic demo data — never allowed to overwrite a real snapshot */
+    fixture?: boolean;
   };
   nodes: Record<string, BranchNode>;
   root_ids: string[];

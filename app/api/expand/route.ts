@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { persistWarmedBoard } from "@/lib/snapshot";
 import {
   expandNode,
   expandViaXSearch,
@@ -169,21 +170,39 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "not connected to X" }, { status: 401 });
     }
     const covered = coveredGround(board, nodeId);
-    const seed = citedPosts(board, nodeId)[0];
-    const conversationId = seed?.conversation_id ?? seed?.id;
-    if (!conversationId) {
+    // Pull replies from EVERY post this card cites, not just one.
+    // A node often cites a single low-traffic post, so opening only that
+    // conversation surfaced 1-like noise while a busier thread sat beside it.
+    // Gather across all of them, then rank once.
+    const seeds = citedPosts(board, nodeId)
+      .sort((a, b) => (b.metrics?.replies ?? 0) - (a.metrics?.replies ?? 0))
+      .slice(0, 3);
+    if (!seeds.length) {
       return NextResponse.json(
         { error: "no post behind this card to read replies from" },
         { status: 422 },
       );
     }
     try {
-      const replies = (await getReplies(tok.access_token, conversationId))
+      const gathered = (
+        await Promise.all(
+          seeds.map((sp) =>
+            getReplies(tok.access_token, sp.conversation_id ?? sp.id).catch(
+              () => [] as XPost[],
+            ),
+          ),
+        )
+      ).flat();
+
+      const byId = new Map(gathered.map((p) => [p.id, p]));
+      const replies = [...byId.values()]
         .filter((p) => !covered.postIds.has(p.id))
+        .sort((a, b) => (b.metrics?.likes ?? 0) - (a.metrics?.likes ?? 0))
         .slice(0, MAX_CHILDREN);
+
       if (!replies.length) {
         return NextResponse.json(
-          { error: "no replies found for this post" },
+          { error: "no replies on the posts behind this card" },
           { status: 404 },
         );
       }
@@ -222,6 +241,8 @@ export async function POST(req: Request) {
             }
           : b,
       );
+      // rehearsing the demo path is what warms the snapshot — see persistWarmedBoard
+      after(() => persistWarmedBoard(getBoard()));
       return NextResponse.json({ children, posts, fork, source: "x_replies" });
     } catch (err) {
       console.error("[expand/replies]", err);
@@ -401,6 +422,10 @@ export async function POST(req: Request) {
       );
       return { ...b, nodes, posts: { ...b.posts, ...newPosts } };
     });
+
+    // Persist AFTER the response flushes: the disk write must never sit in the
+    // latency path of an expand the user is watching.
+    after(() => persistWarmedBoard(getBoard()));
 
     // ship the posts back so the client can render their citation chips
     return NextResponse.json({

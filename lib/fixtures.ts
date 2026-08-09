@@ -327,7 +327,9 @@ const NODES: BranchNode[] = [
 
 export const FIXTURE_BOARD: Board = {
   date: "2026-08-08",
-  seed: { mode: "my_day", label: "Your day on X", snapshot: true },
+  // `fixture` is load-bearing: it is what stops synthetic data from being
+  // written over a real captured snapshot when a fixture board gets expanded
+  seed: { mode: "my_day", label: "Your day on X", snapshot: true, fixture: true },
   nodes: Object.fromEntries(NODES.map((n) => [n.id, n])),
   root_ids: ["t_tariffs", "t_inference", "t_transit", "t_sports"],
   posts: FIXTURE_POSTS,

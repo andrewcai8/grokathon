@@ -59,12 +59,15 @@ Connect your account at `/api/auth/login`.
 
 ## Credentials
 
-Both are Grokathon-provided:
+The first two are Grokathon-provided:
 
 - `XAI_API_KEY` — from console.x.ai. Not the Grok CLI token in `~/.grok/auth.json`.
 - `X_CLIENT_ID` / `X_CLIENT_SECRET` — developer.x.com, with
   `http://localhost:3000/api/auth/callback` registered as a callback, and
   prepaid credits on the account.
+- `EXA_API_KEY` — exa.ai. The web half of the evidence split: X for what people
+  are saying, Exa for what actually happened. A decision board is a 503 without
+  it, and a news board loses its article citations.
 
 ## Before demoing
 

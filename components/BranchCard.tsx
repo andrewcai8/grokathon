@@ -536,8 +536,17 @@ function BranchCardInner({
 
         {/* The forks are all claim-shaped — replies, counters, primary sources,
             falsifiers. None of them mean anything about a choice, so an options
-            board simply doesn't offer them rather than offering dead buttons. */}
-        {selected && !pending && !isOption && !isQuestion ? (
+            board simply doesn't offer them rather than offering dead buttons.
+
+            A question asked of the BOARD is the exception among questions. It
+            has no card above it: it IS a root, sitting in column 0 holding
+            topics, and every other root there offers counters and primary
+            sources. Withholding them only from this one would make a topic's
+            depth depend on whether it arrived from your timeline or from
+            something you typed, which is not a distinction the board makes
+            anywhere else. A question asked OF a card keeps them hidden — there
+            the reply is the card, and forking your own question is not a move. */}
+        {selected && !pending && !isOption && (!isQuestion || n.parent_id === null) ? (
           <div className="gb-attribution mt-3 flex flex-wrap gap-1.5">
             {forks.map((f) => (
               <button

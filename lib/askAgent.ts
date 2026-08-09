@@ -41,6 +41,20 @@ import type { BranchNode, GrokChild, XPost } from "./schema";
 const MAX_TURNS = 5;
 
 /**
+ * An ask is ONE node.
+ *
+ * Every other fork hands back a column of siblings, which is why MAX_CHILDREN
+ * is 3 — three plots is what the layout reserves. An ask isn't that shape: the
+ * reply lands on the question card itself, so a card beside it is an extra
+ * finding, not a share of the answer. Letting it return three made the loading
+ * preview promise a column and the reply deliver a paragraph, and the cards it
+ * did produce were usually the answer restated (see the CARDS DEFAULT TO ZERO
+ * instruction below, which was fighting the schema rather than agreeing with
+ * it). One is the ceiling now, so the plot we reserve is a plot we can fill.
+ */
+const ASK_MAX_CHILDREN = 1;
+
+/**
  * How many tool calls one question may spend.
  *
  * Unbudgeted, the agent is genuinely thorough and genuinely too slow: measured
@@ -181,7 +195,7 @@ const ANSWER_SCHEMA = {
       // "placeholder" — the schema was manufacturing the junk downstream then
       // had to filter out.
       minItems: 0,
-      maxItems: MAX_CHILDREN,
+      maxItems: ASK_MAX_CHILDREN,
       items: {
         type: "object",
         properties: {
@@ -239,12 +253,25 @@ interface AskAnswer {
  */
 export async function askAgent(opts: {
   question: string;
-  parent: BranchNode;
+  /**
+   * The card the question was asked from, or null for a question asked of the
+   * BOARD — "breaking news", typed with nothing under the cursor.
+   *
+   * Null is not a degenerate case of a card, it inverts what a good answer
+   * looks like. Asked of a card, the reply is the result and cards are the
+   * exception (see the prompt below). Asked of the board, there is no reply
+   * worth reading on its own — "here is what's breaking" is only useful as the
+   * topics themselves, which is what makes this the one ask that must return
+   * children. Everything else about the run is identical.
+   */
+  parent: BranchNode | null;
   ancestors: string[];
   /** posts already behind the card — the agent starts from these, not from zero */
   corpus: XPost[];
   /** titles already on the board; an answer that restates one teaches nothing */
   covered: string[];
+  /** the board's own date, so "breaking" means today rather than whenever */
+  date?: string;
   xToken?: string;
 }): Promise<{
   answer: string;
@@ -258,7 +285,25 @@ export async function askAgent(opts: {
   web: WebSource[];
   trace: AskTrace[];
 }> {
-  const { question, parent, ancestors, corpus, covered, xToken } = opts;
+  const { question, parent, ancestors, corpus, covered, date, xToken } = opts;
+
+  /**
+   * How many cards this ask may return, and why it depends on where it was asked.
+   *
+   * A card ask is capped at ASK_MAX_CHILDREN because its reply lands on the
+   * question card itself — a card beside it is a bonus finding, not the answer.
+   * A board ask has no such card to be the answer: "what's breaking" is only
+   * useful AS the topics, so it gets the board's own branching factor. Same
+   * agent, same schema, same everything else — one number.
+   */
+  const maxCards = parent ? ASK_MAX_CHILDREN : MAX_CHILDREN;
+  const schema = {
+    ...ANSWER_SCHEMA,
+    properties: {
+      ...ANSWER_SCHEMA.properties,
+      children: { ...ANSWER_SCHEMA.properties.children, maxItems: maxCards },
+    },
+  };
 
   const pool: EvidencePool = {
     posts: Object.fromEntries(corpus.map((p) => [p.id, p])),
@@ -355,11 +400,46 @@ export async function askAgent(opts: {
         .slice(0, 20)
         .map((p) => JSON.stringify(toolPost(p)))
         .join("\n")}`
-    : "There are no posts behind this card yet. Your tools are the only evidence you will have.";
+    : parent
+      ? "There are no posts behind this card yet. Your tools are the only evidence you will have."
+      : "Nothing has been retrieved yet. Your tools are the only evidence you will have.";
 
-  const prompt = `${ancestors.length ? `WHERE THIS SITS: ${ancestors.join(" > ")}\n\n` : ""}THE CARD THE USER ASKED FROM
+  /**
+   * What the question was asked OF.
+   *
+   * A card ask resolves its pronouns against that card ("who pays for THIS").
+   * A board ask has no card and no lineage — it is the user turning to the
+   * board itself and naming a subject, so the honest context is the board's
+   * date and the fact that whatever comes back opens a topic of its own.
+   */
+  const placement = parent
+    ? `${ancestors.length ? `WHERE THIS SITS: ${ancestors.join(" > ")}\n\n` : ""}THE CARD THE USER ASKED FROM
 title: ${parent.title}
-body: ${parent.body ?? "(none)"}
+body: ${parent.body ?? "(none)"}`
+    : `ASKED OF THE BOARD ITSELF${date ? `, today being ${date}` : ""}. There is no card above this question and no story it belongs to — the user typed it at the top of an open board and what you return opens a NEW TOPIC there, alongside the topics already on it. Treat "recent", "now" and "breaking" as meaning today.`;
+
+  /**
+   * What cards are FOR, which is the one thing the two kinds of ask disagree on.
+   *
+   * Asked of a card, a card beside the reply is a second thing to read and
+   * almost always the reply restated — hence zero, hard. Asked of the board,
+   * the reply has nowhere to be the answer: "here's what's breaking" is a
+   * sentence, and the topics are what the user can actually open, argue with
+   * and expand. So the same instruction inverts rather than relaxes.
+   */
+  const cardsRule = parent
+    ? `CARDS DEFAULT TO ZERO, and that is the normal outcome. ONE is the most you may ever give. A card is not a summary of part of your answer; it is a SEPARATE finding the reader would want to open, argue with and expand on its own. Give it only when there is a distinct thread — a specific dissent, a named actor, a concrete number — that the answer doesn't already make. If a card would restate a sentence you just wrote, it is noise: the user would read the same thing twice, once as your reply and once as a card pretending to be a finding.
+
+Ask yourself before that card: does this say something my answer doesn't? If no, drop it. A card that paraphrases the answer is the single worst thing you can return here.`
+    : `THE CARDS ARE THE ANSWER HERE. Give ${maxCards} unless there genuinely aren't that many, because there is no card above this question for your reply to land on — the topics you return ARE what the user asked for, and a paragraph with nothing under it is a dead end on a board whose whole point is opening things.
+
+Each card is a TOPIC, the way "Steel tariffs" or "Super Bowl LIX" is a topic: one story, named as a person would say it, with a body that says what actually happened and why it matters. Not a claim, not a quote, not a category — something with more underneath it, because the user's next move is to expand it. Set type to "story" or "topic".
+
+Make them genuinely different stories rather than three angles on the biggest one, and rank them: priority is how much this matters to someone catching up right now.
+
+Your reply above them is the orientation — a couple of sentences on what the picture looks like — not a list of the cards. Don't restate them.`;
+
+  const prompt = `${placement}
 
 THE QUESTION, in the user's own words:
 "${question}"
@@ -372,9 +452,7 @@ SEARCH FIRST unless the question plainly doesn't need it. You have the live X AP
 
 CITE THE ANSWER ITSELF in answer_source_post_ids / answer_source_web_ids. Those are the answer's own sources and they are shown right under it, so an answer resting on evidence should carry it there — not in cards.
 
-CARDS DEFAULT TO ZERO, and that is the normal outcome. A card is not a summary of part of your answer; it is a SEPARATE finding the reader would want to open, argue with and expand on its own. Give one only when there is a distinct thread — a specific dissent, a named actor, a concrete number — that the answer doesn't already make. If a card would restate a sentence you just wrote, it is noise: the user would read the same thing twice, once as your reply and once as a card pretending to be a finding.
-
-Ask yourself before each card: does this say something my answer doesn't? If no, drop it. Three cards that paraphrase the answer is the single worst thing you can return here.
+${cardsRule}
 
 For any card you do give: cite BOTH kinds of evidence where you have them. A post is the better source for what someone said or how people reacted; an article is the better source for a number, an official statement, or what actually happened. Article refs go in source_web_ids.
 
@@ -406,7 +484,9 @@ Answer the question that was ACTUALLY asked. If the honest answer is "the eviden
         : input,
       tools: spent ? [] : tools,
       previousResponseId: previousId,
-      schema: ANSWER_SCHEMA,
+      // the per-ask schema, not the template: `maxCards` above is what makes a
+      // card ask return one card and a board ask return a column
+      schema,
       schemaName: "ask_answer",
     });
 
@@ -502,7 +582,7 @@ Answer the question that was ACTUALLY asked. If the honest answer is "the eviden
      * failed to keep — either way we cannot show the user the thing it claims
      * to cite, so it is not evidence.
      */
-    const children: GrokChild[] = parsed.children.slice(0, MAX_CHILDREN).map((c) => ({
+    const children: GrokChild[] = parsed.children.slice(0, maxCards).map((c) => ({
       type: c.type,
       title: c.title,
       body: c.body,

@@ -12,7 +12,7 @@
  */
 import { buildBoardFromTrends, rollUpCitations } from "../lib/boardBuilder";
 import { isGrounded } from "../lib/evidence";
-import { relaxedQuery } from "../lib/grokClient";
+import { fallbackQueries } from "../lib/grokClient";
 import type { BranchNode } from "../lib/schema";
 import type { XTrend } from "../lib/xClient";
 
@@ -66,21 +66,35 @@ const rolled = rollUpCitations(roots[0], [child]);
 check("a trend root still adopts its children's posts", rolled.source_post_ids.length === 3, rolled.source_post_ids);
 check("and keeps its provenance alongside them", rolled.origin?.kind === "x_trend");
 
-console.log("\nthe fallback query is blunt enough to actually return posts");
-const relaxed = relaxedQuery(TRENDS[0].name);
-check("ORs terms rather than ANDing a whole headline", relaxed.includes(" OR "), relaxed);
-check("keeps the proper nouns that survive a rewording", /OpenAI/.test(relaxed) && /Anthropic/.test(relaxed), relaxed);
-check("drops the stopwords that carry no signal", !/\bOver\b/.test(relaxed) && !/\band\b/.test(relaxed), relaxed);
-check("drops lang: — the story is the story in any language", !relaxed.includes("lang:"), relaxed);
-check("still excludes retweets", relaxed.includes("-is:retweet"), relaxed);
-check("no wildcard — X 400s on '*' anywhere in a term", !relaxed.includes("*"), relaxed);
+console.log("\nthe fallback ladder loosens by one step, not five");
+const ladder = fallbackQueries(TRENDS[0].name);
+const [paired, loose] = ladder;
+check("tries the focused form before the noisy one", ladder.length === 2, ladder);
+check(
+  "entities AND topic — two groups, so a post must be about both",
+  /^\([^)]+\) \([^)]+\)/.test(paired),
+  paired,
+);
+check("keeps the proper nouns that survive a rewording", /OpenAI/.test(paired) && /Anthropic/.test(paired), paired);
+check(
+  "does NOT build the query around the ambiguous verb",
+  // "Exchange" may appear as one OR-ed topic term among several, but must never
+  // be ANDed as its own group — that is the mistake that cost us the story.
+  !/\(Exchange\)/.test(paired),
+  paired,
+);
+check("drops the stopwords that carry no signal", !/\bOver\b/.test(paired) && !/\band\b/.test(paired), paired);
+check("drops lang: — the story is the story in any language", !paired.includes("lang:"), paired);
+check("still excludes retweets", ladder.every((q) => q.includes("-is:retweet")), ladder);
+check("no wildcard — X 400s on '*' anywhere in a term", !ladder.some((q) => q.includes("*")), ladder);
+check("the last resort is entities only", /^\([^)]+\) -is:retweet$/.test(loose), loose);
 
 // A headline with no capitalised terms must still produce something searchable.
-const lower = relaxedQuery("the markets are down again today after the news");
-check("a headline with no proper nouns still yields terms", lower.includes(" OR "), lower);
+const lower = fallbackQueries("the markets are down again today after the news");
+check("a headline with no proper nouns still yields terms", lower[0].includes(" OR "), lower);
 // Degenerate input must not produce a query that means "everything".
-const empty = relaxedQuery("a of the");
-check("an unusable headline falls back rather than matching all of X", empty.length > "-is:retweet".length, empty);
+const empty = fallbackQueries("a of the");
+check("an unusable headline falls back rather than matching all of X", empty[0].length > "-is:retweet".length, empty);
 
 console.log(
   failures ? `\n${failures} check(s) FAILED\n` : "\nall checks passed\n",

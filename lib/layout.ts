@@ -84,6 +84,28 @@ const SKELETON_SHAPES = [
 ];
 
 /**
+ * An ask reserves NOTHING out here.
+ *
+ * A fork spends the wait building a column, so skeletons one column right are
+ * an honest forecast of where its output lands. An ask's output lands on the
+ * question card ITSELF — the reply is that card's body — so previewing it in
+ * the next column pointed at a plot that stays empty, and the pan that flew you
+ * there left you looking away from the card the answer was about to fill.
+ *
+ * The wait is drawn inside the question card instead (BranchCard, `pending`),
+ * which is both where the answer arrives and where the space for it has to be
+ * reserved. Grok may still add a single evidence card beside it, but that is a
+ * separate finding it usually doesn't have — not the answer — so it arrives on
+ * its own rather than being promised in advance.
+ *
+ * A question asked of the BOARD is the exception, and keeps its skeletons: it
+ * has no card to answer onto, so its whole result IS the column of topics under
+ * it (see askAgent's `parent: null`). There the forecast is honest.
+ */
+const asksInPlace = (node: BranchNode) =>
+  node.fork === "ask" && node.parent_id !== null;
+
+/**
  * Deterministic height estimate. Deliberately not DOM-measured: the zoom needs a
  * stable layout that doesn't reflow mid-transition, and a card that changes
  * height while you're flying toward it reads as a bug.
@@ -190,7 +212,7 @@ export function computeLayout(
       const kids = kidsOf(node);
       let cursor = top;
 
-      if (isPending && kids.length === 0) {
+      if (isPending && kids.length === 0 && !asksInPlace(node)) {
         // Reserve the band NOW, before Grok answers. The siblings below drop
         // immediately, so when real text lands it fills space that was already
         // made for it — no jump, no reflow.
@@ -276,4 +298,48 @@ export function computeLayout(
 /** Where the hover ghost sits: one column right, aligned to the hovered card. */
 export function ghostSlot(card: PositionedCard): { x: number; y: number; w: number } {
   return { x: card.x + CARD_W + COL_GAP, y: card.y, w: CARD_W };
+}
+
+/**
+ * The foot of the root column — where column 0 carries on below the last root.
+ *
+ * Two affordances live down here (the board-level ask, then "more of your
+ * day"), and both need this number, so it is derived once from the layout
+ * rather than recomputed at each call site.
+ */
+export function rootFootY(layout: Layout): number {
+  return (
+    layout.cards
+      .filter((c) => c.col === 0)
+      .reduce((m, c) => Math.max(m, c.y + c.h), 0) + CARD_GAP
+  );
+}
+
+/**
+ * How tall the board-level ask plot is, fixed.
+ *
+ * Every other card here is measured, because its height is whatever its text
+ * turned out to be. This one is a plot, not a card: "more of your day" is
+ * stacked directly beneath it, so a box that grew on focus would shove that
+ * button out from under the cursor mid-click. The component sets this height
+ * explicitly rather than growing into it, which makes the constant true by
+ * construction instead of an estimate that can drift.
+ */
+export const ROOT_ASK_H = 142;
+
+/**
+ * Where a question asked of the BOARD is typed, and where its answer lands.
+ *
+ * Same principle as ghostSlot: you write the question in the plot the card is
+ * about to occupy. The difference is only which column that is — a question
+ * asked of a card grows a child one column right, a question asked of the board
+ * grows a root at the bottom of column 0.
+ */
+export function rootAskSlot(layout: Layout): {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+} {
+  return { x: LEFT_PAD, y: rootFootY(layout), w: CARD_W, h: ROOT_ASK_H };
 }

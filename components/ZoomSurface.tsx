@@ -3,13 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useBoard } from "@/lib/store";
 import { lodFor, clamp, frameRect } from "@/lib/lod";
-import { CARD_GAP, CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
+import { CARD_GAP, CARD_W, COL_GAP, LEFT_PAD, ROOT_ASK_H, rootFootY } from "@/lib/layout";
 import { readMediaUrls } from "@/lib/media";
+import { coveredGround } from "@/lib/boardBuilder";
 import { BranchCard } from "./BranchCard";
 import { GhostColumn } from "./GhostColumn";
 import { AskComposer } from "./AskComposer";
 import { SkeletonCard } from "./SkeletonCard";
 import { MoreRootsCard } from "./MoreRootsCard";
+import { RootAskCard } from "./RootAskCard";
 import type { Board } from "@/lib/schema";
 
 /** Titles from root down to (not including) this node, for prompt context. */
@@ -276,19 +278,23 @@ export function ZoomSurface() {
       const c = { x: s.viewport.w / 2, y: s.viewport.h / 2 };
 
       /**
-       * @ opens the composer on whatever you're pointing at.
+       * @ opens the composer on whatever you're pointing at — or on the board.
        *
        * The muscle memory is X's: you reply to a post by typing @grok, and here
-       * the card under the cursor IS the post you're replying to. Hover wins
-       * over selection for the same reason it does everywhere else on this
-       * surface — it's what you're currently looking at.
+       * the card under the cursor IS the post you're replying to.
+       *
+       * Pointing at nothing is a question too, and it used to fall through to
+       * the selection — but there is nearly always a selection, so the board
+       * itself was unreachable by keyboard: every @ went to whichever card you
+       * last clicked, whether or not you were still looking at it. Hover now
+       * decides outright, and an empty hand asks the board.
        */
       if (e.key === "@") {
-        const target = s.hoveredId ?? s.selectedId;
-        if (target && s.board?.nodes[target]) {
-          e.preventDefault();
-          s.startAsk(target);
-        }
+        e.preventDefault();
+        if (s.hoveredId && s.board?.nodes[s.hoveredId]) s.startAsk(s.hoveredId);
+        // ...and on a decision board there is no plot to put the cursor in, so
+        // the keystroke does nothing rather than focusing something unrendered
+        else if (s.board?.kind !== "options") s.focusRootAsk();
         return;
       }
       if (e.key === "Escape" && s.asking) {
@@ -326,13 +332,15 @@ export function ZoomSurface() {
       fork: string,
       append: boolean,
       /** fork "ask" only — the user's question and the corpus to start from */
-      ask?: { question: string; corpus: string[] },
+      ask?: { question: string; corpus: string[]; covered: string[] },
     ) => {
       const s = useBoard.getState();
       const startedAt = performance.now();
       s.setPending(id, true);
-      // skeletons are laid out on this same frame — show them straight away
-      requestAnimationFrame(() => revealChildColumnOf(id));
+      // skeletons are laid out on this same frame — show them straight away.
+      // An ask has none: its answer lands on the card the user just typed into,
+      // so panning to the next column would be panning away from it.
+      if (fork !== "ask") requestAnimationFrame(() => revealChildColumnOf(id));
       void fetch("/api/expand", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -489,24 +497,35 @@ export function ZoomSurface() {
   );
 
   /**
-   * Ask @grok about a card, in the user's own words.
+   * Ask @grok, in the user's own words — of a card, or of the board.
    *
    * The question becomes a real node before the request goes out, so what the
    * user sees is: they type, the card they typed into becomes theirs, and the
    * evidence lands underneath it. requestExpand then treats that node like any
    * other — the agent is just the fork it happens to run.
+   *
+   * `parentId: null` is the board-level ask ("breaking news"), and the ONLY
+   * thing that differs is what the question hangs off: a root instead of a
+   * card, so no card's corpus to start from. Everything downstream — the node,
+   * the fork, the route, the agent, the answer landing on the question card —
+   * is the same path, which is the point.
    */
   const submitAsk = useCallback(
-    (parentId: string, question: string) => {
+    (parentId: string | null, question: string) => {
       const s = useBoard.getState();
-      const parent = s.board?.nodes[parentId];
+      const parent = parentId ? s.board?.nodes[parentId] : null;
       const q = s.addQuestion(parentId, question);
       if (!q) return;
       // the card's own evidence is the agent's starting corpus — it has no
-      // citations of its own to derive one from, being a question
+      // citations of its own to derive one from, being a question. Asked of the
+      // board there is no such card, and the agent's tools are all it gets.
       requestExpand(q.id, "ask", false, {
         question,
         corpus: parent?.source_post_ids ?? [],
+        // what's already up there, so the answer isn't something the user has
+        // read — the same novelty rule "more of your day" sends, and the reason
+        // a board ask can't hand back a topic that's already a root
+        covered: s.board ? coveredGround(s.board).titles : [],
       });
       requestAnimationFrame(() => revealColumn(q.id));
     },
@@ -523,11 +542,29 @@ export function ZoomSurface() {
   // the composer already owns that slot
   const showGhost = Boolean(hoveredCard) && hoveredCard?.node.id !== askingId;
 
-  // the foot of the root column — where "more of your day" continues the list
-  const rootColumnBottom =
-    (layout?.cards ?? [])
-      .filter((c) => c.col === 0)
-      .reduce((m, c) => Math.max(m, c.y + c.h), 0) + CARD_GAP;
+  /**
+   * Asking the board is a NEWS move, and there is no plot for it on a decision.
+   *
+   * A decision board's roots are options on one question — they carry
+   * attributes, share an axis, and are compared against each other. A topic
+   * spawned by the news agent would land in that column as a card with an
+   * epistemic badge and post citations, next to three options being scored on
+   * price and range: the exact category error /api/expand already refuses an
+   * ask with (422, "asking isn't supported on a decision board yet").
+   *
+   * So the affordance goes away rather than being offered and then refused.
+   * Wanting more of a decision is what "more directions" is for, and it's
+   * right underneath.
+   */
+  const canAskBoard = board?.kind !== "options";
+
+  // the foot of the root column, where it carries on below the last root: the
+  // board-level ask plot first, then "more of your day" under it — and on a
+  // decision board, straight to "more directions" with no hole where the ask
+  // plot would have been
+  const rootColumnBottom = layout ? rootFootY(layout) : 0;
+  const moreRootsY =
+    rootColumnBottom + (canAskBoard ? ROOT_ASK_H + CARD_GAP : 0);
 
   /**
    * The lineage of whatever you're pointing at, root to leaf.
@@ -595,7 +632,18 @@ export function ZoomSurface() {
           <SkeletonCard key={box.key} box={box} index={i} />
         ))}
 
-        {layout && board ? <MoreRootsCard y={rootColumnBottom} /> : null}
+        {/* The root column carries on below the last root: ask the board, then
+            more of what it already knows. The ask sits first because its plot
+            is fixed-height and MoreRootsCard's isn't — stacking them the other
+            way would make this one's position depend on that one's text. */}
+        {layout && board && canAskBoard ? (
+          <RootAskCard
+            y={rootColumnBottom}
+            onSubmit={(q: string) => submitAsk(null, q)}
+          />
+        ) : null}
+
+        {layout && board ? <MoreRootsCard y={moreRootsY} /> : null}
 
         {board && layout ? layout.cards.map((card) => (
           <BranchCard

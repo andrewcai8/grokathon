@@ -302,7 +302,7 @@ function BranchCardInner({
             Grok said back, so it gets attributed. Without this the answer reads
             as a description of the question rather than as a reply to it — the
             one card on the board with two voices on it. */}
-        {isQuestion && n.body ? (
+        {isQuestion && (n.body || pending) ? (
           <div
             className="gb-attribution gb-label mt-3 flex items-center gap-1.5"
             style={{ color: "var(--gb-live)" }}
@@ -311,6 +311,30 @@ function BranchCardInner({
             {n.epistemic === "thin_evidence" ? (
               <span style={{ color: "var(--gb-faint)" }}>· answered without searching</span>
             ) : null}
+          </div>
+        ) : null}
+
+        {/*
+          The wait, drawn where the answer will be.
+
+          This used to be three skeleton cards a column to the right — a preview
+          of a column an ask never builds, since the reply IS this card's body.
+          Same idea, right address: the lines sit in the paragraph they become,
+          and because they're in the flow they reserve its height too, so the
+          answer replaces them instead of shoving the band open.
+        */}
+        {isQuestion && pending && !n.body ? (
+          // 8px bar + 13px gap is the 14px answer's own line box (leading 1.55),
+          // so five lines of shimmer occupy what five lines of reply will — the
+          // reserve the old skeleton column was for, at the address that needs it.
+          <div className="mt-2 flex flex-col gap-[13px] pt-[6px]" aria-hidden>
+            {[97, 92, 99, 88, 71].map((w, i) => (
+              <div
+                key={i}
+                className="gb-skel-line h-[8px] rounded-[2px]"
+                style={{ width: `${w}%`, animationDelay: `${i * 45}ms` }}
+              />
+            ))}
           </div>
         ) : null}
 

@@ -70,8 +70,23 @@ interface BoardState {
    * to wait for and nothing a server could add. The card is on screen in the
    * slot they typed into on the next frame, and the answer fills in underneath
    * it — the board's "never open on a spinner" rule applied to asking.
+   *
+   * `parentId: null` asks the BOARD rather than a card, and the question
+   * becomes a root. Nothing else about the node changes — it is the same
+   * question card, on the same "ask" fork, answered by the same agent — so a
+   * question that spawns a topic and a question that spawns a claim are one
+   * mechanism seen from two columns.
    */
-  addQuestion: (parentId: string, question: string) => BranchNode | null;
+  addQuestion: (parentId: string | null, question: string) => BranchNode | null;
+  /**
+   * Put the cursor in the board-level ask plot.
+   *
+   * A nonce rather than a boolean: pressing @ twice in a row should focus twice,
+   * and a flag that is already true is indistinguishable from one nobody set.
+   * The plot owns its own text, so there is no question state to hold here.
+   */
+  rootAskFocus: number;
+  focusRootAsk: () => void;
   /**
    * Attach an answer's own citations to the question card.
    *
@@ -315,10 +330,14 @@ export const useBoard = create<BoardState>((set, get) => ({
   startAsk: (nodeId) => set({ asking: nodeId, selectedId: nodeId }),
   cancelAsk: () => set({ asking: null }),
 
+  rootAskFocus: 0,
+  focusRootAsk: () => set((s) => ({ rootAskFocus: s.rootAskFocus + 1 })),
+
   addQuestion: (parentId, question) => {
     const { board, expanded } = get();
-    const parent = board?.nodes[parentId];
-    if (!board || !parent) return null;
+    const parent = parentId ? board?.nodes[parentId] : null;
+    // a card ask needs its card; a board ask needs only the board
+    if (!board || (parentId && !parent)) return null;
 
     const now = new Date().toISOString();
     const q: BranchNode = {
@@ -332,8 +351,16 @@ export const useBoard = create<BoardState>((set, get) => ({
       // sits above that card's other children: you asked it last, so it is the
       // thing you are looking at
       priority: 1,
-      generality: Math.max(0, parent.generality - 0.05),
-      depth: parent.depth + 1,
+      /**
+       * A question asked of the board is as general as the board gets.
+       *
+       * Column index IS generality (doc §3.3), so a root has to read as 1 or
+       * the axis stops meaning anything at the left edge — and its answers,
+       * clamped to parent - 0.05 by childrenToNodes, then land in column 1
+       * exactly where a trend's stories do.
+       */
+      generality: parent ? Math.max(0, parent.generality - 0.05) : 1,
+      depth: parent ? parent.depth + 1 : 0,
       /**
        * A question cites nothing.
        *
@@ -352,19 +379,33 @@ export const useBoard = create<BoardState>((set, get) => ({
     const nodes = {
       ...board.nodes,
       [q.id]: q,
-      [parentId]: {
-        ...parent,
-        children_ids: [...parent.children_ids, q.id],
-        has_children: true,
-        updated_at: now,
-      },
+      ...(parent && parentId
+        ? {
+            [parentId]: {
+              ...parent,
+              children_ids: [...parent.children_ids, q.id],
+              has_children: true,
+              updated_at: now,
+            },
+          }
+        : {}),
     };
-    // open the parent AND the question: the question's own skeletons are what
-    // the user watches fill in, and they only lay out if it is expanded
+    /**
+     * A board question joins root_ids, and only ever at the end.
+     *
+     * Same rule the layout states for "more of your day": the root column is
+     * appended to, never re-sorted, because a question inserted above roots
+     * the user had already read would shove the whole board down under their
+     * cursor. You asked it last, so it is last.
+     */
+    const rootIds = parentId ? board.root_ids : [...board.root_ids, q.id];
+    // open the parent so the question card it just grew is visible. The
+    // question is opened too, for the evidence card Grok may hang off it —
+    // its own wait is drawn inside it now, not as a column beneath it.
     const next = new Set(expanded);
-    next.add(parentId);
+    if (parentId) next.add(parentId);
     next.add(q.id);
-    const nextBoard = { ...board, nodes };
+    const nextBoard = { ...board, nodes, root_ids: rootIds };
     set({
       board: nextBoard,
       expanded: next,

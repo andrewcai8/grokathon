@@ -5,8 +5,8 @@ import {
   expandViaXSearch,
   hasGrok,
   MAX_CHILDREN,
+  fallbackQueries,
   readMedia,
-  relaxedQuery,
   searchQueryFor,
   XSEARCH_FORKS,
 } from "@/lib/grokClient";
@@ -130,37 +130,71 @@ async function groundNode(
   token: string,
   title: string,
 ): Promise<{ posts: XPost[]; query?: string; error?: string }> {
-  const queries: string[] = [];
-  try {
-    queries.push(await searchQueryFor(title));
-  } catch (err) {
-    // one flaky model call must not cost us the retrieval it was only phrasing
-    console.warn("[expand] query generation failed, falling back to terms:", err);
-  }
-  queries.push(relaxedQuery(title));
-
-  // insertion order is preference order: whatever the precise query found stays
-  // in front of the top-up, and dedupe keeps the overlap from counting twice
+  // insertion order is preference order: whatever the sharpest query found
+  // stays in front of the top-ups, and dedupe keeps overlap from counting twice
   const byId = new Map<string, XPost>();
   const used: string[] = [];
+  /** what each attempt actually returned — the input to the informed retry */
+  const failed: { query: string; found: number }[] = [];
+  const tried = new Set<string>();
   let error: string | undefined;
 
-  for (const query of queries) {
+  /** Runs one query. Returns true once we hold enough to write from. */
+  const run = async (query: string): Promise<boolean> => {
+    if (tried.has(query)) return false;
+    tried.add(query);
     try {
       const posts = await searchRecent(token, query, 40);
       for (const p of posts) if (!byId.has(p.id)) byId.set(p.id, p);
       if (posts.length) used.push(query);
-      // the second query costs ~300ms and only runs when the first left us
-      // without enough to write from
-      if (byId.size >= MIN_CORPUS) break;
+      if (byId.size >= MIN_CORPUS) return true;
+      failed.push({ query, found: posts.length });
       console.warn(
         "[expand] X search returned %d post(s) — below the floor — for: %s",
         posts.length, query,
       );
     } catch (err) {
       error = err instanceof Error ? err.message : "X search failed";
+      // a query X rejected is a query that found nothing, as far as the next
+      // attempt is concerned — it still shouldn't be tried again
+      failed.push({ query, found: 0 });
       console.error("[expand] X search FAILED (not empty) for %s: %s", query, error);
     }
+    return false;
+  };
+
+  /** the model's query, optionally shown what its previous attempts returned */
+  const ask = async (): Promise<boolean> => {
+    try {
+      return await run(await searchQueryFor(title, failed));
+    } catch (err) {
+      // one flaky model call must not cost us the retrieval it was only phrasing
+      console.warn("[expand] query generation failed, falling back to terms:", err);
+      return false;
+    }
+  };
+
+  // 1. the model's best guess, written blind
+  let enough = await ask();
+
+  /**
+   * 2. the same model, now shown what its guess actually returned.
+   *
+   * This is the one step that makes the retrieval smarter rather than merely
+   * more persistent: everything else here is a fixed ladder of guesses, and a
+   * fixed ladder cannot learn that it searched for the wrong event. It costs a
+   * second Grok call (~2s) and only ever runs on a node the first query failed
+   * to ground — a node that would otherwise be on its way to an error.
+   *
+   * Skipped when there's nothing to report back: with no failed attempt to
+   * learn from, this is just the same blind guess a second time.
+   */
+  if (!enough && failed.length) enough = await ask();
+
+  // 3. the model-free ladder, as the backstop that cannot fail the same way
+  for (const query of fallbackQueries(title)) {
+    if (enough) break;
+    enough = await run(query);
   }
 
   return {
@@ -219,6 +253,14 @@ export async function POST(req: Request) {
      * is the only side guaranteed to know which card that was.
      */
     corpus?: string[];
+    /**
+     * fork "ask" only: titles the client's board is already showing.
+     *
+     * Same reason `node` and `kind` travel — a question node is minted by the
+     * client, so the server is holding a synthetic one-node board and its own
+     * coveredGround() would report that nothing has been read.
+     */
+    covered?: string[];
   };
   const nodeId = body.nodeId;
   if (!nodeId) {
@@ -339,12 +381,39 @@ export async function POST(req: Request) {
         .map((id) => board.posts[id])
         .filter(Boolean) as XPost[];
 
+      /**
+       * A question with no parent was asked of the BOARD, not of a card.
+       *
+       * The client mints question nodes, and it mints this one as a root — so
+       * `parent_id === null` is not a missing value to guard against, it is the
+       * fact itself, arriving the same way every other fact about the client's
+       * board does. askAgent reads it as "there is no card for the reply to
+       * land on, the topics ARE the answer"; everything else about the run,
+       * including this whole route, is unchanged.
+       */
+      const rooted = node.parent_id === null;
+
       const out = await askAgent({
         question,
-        parent: node,
+        parent: rooted ? null : node,
         ancestors,
+        /**
+         * Union, for the same reason /api/roots/more takes one.
+         *
+         * A board ask is the one ask whose whole job is to come back with
+         * something NOT already up there — "breaking news" that hands back the
+         * trend sitting in root 1 has wasted the question. But this node was
+         * minted client-side, so the server's `board` here is usually the
+         * synthetic one-node fallback and coveredGround() sees a graph of one.
+         * The client is the side that knows what's on screen, so its titles
+         * travel with the request.
+         */
+        covered: [
+          ...new Set([...(body.covered ?? []), ...coveredGround(board, nodeId).titles]),
+        ],
         corpus,
-        covered: coveredGround(board, nodeId).titles,
+        // "breaking" has to mean today, and the board is what says when today is
+        date: board.date,
         xToken: tok?.access_token,
       });
 

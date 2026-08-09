@@ -431,14 +431,26 @@ export function extractJson<T>(text: string, isValid?: (o: unknown) => boolean):
  * which means the posts are real by construction rather than model-reported:
  * a fabricated citation isn't possible, so no verification pass is needed.
  */
-export async function searchQueryFor(headline: string): Promise<string> {
+export async function searchQueryFor(
+  headline: string,
+  /**
+   * Queries already tried against the real X API, and what they returned.
+   *
+   * This is the whole difference between guessing and searching. Without it the
+   * model emits one query into the dark and never learns that it searched for
+   * the wrong event — which is exactly how "Staff Exchange" became a query
+   * about employees swapping jobs and came back with nothing, and how nothing
+   * then travelled onward as a fact about the world.
+   */
+  failed: { query: string; found: number }[] = [],
+): Promise<string> {
   const schema = {
     type: "object",
     properties: {
       query: {
         type: "string",
         description:
-          "An X (Twitter) search query. Use the distinctive proper nouns and 2-3 salient terms, OR-ing synonyms. Do NOT include the whole headline. NO wildcards (*) — X rejects them; write the variants out instead. Keep it under 120 characters.",
+          "An X (Twitter) search query. AT MOST TWO groups ANDed together — normally the distinctive proper nouns, AND one group of OR-ed topic words. Every group you add is another chance to exclude the real posts. Do NOT include the whole headline. NO wildcards (*) — X rejects them; write the variants out instead. Keep it under 120 characters.",
       },
     },
     required: ["query"],
@@ -452,7 +464,20 @@ export async function searchQueryFor(headline: string): Promise<string> {
 
 HEADLINE: ${headline}
 
-The headline is a synthesised summary and will not appear verbatim in any post. Use the identifying entities (people, products, companies, numbers) and OR together likely phrasings. Do not add lang: or -is: filters; those are added for you.`,
+The headline is a synthesised summary and will not appear verbatim in any post. Use the identifying entities (people, products, companies, numbers) and OR together likely phrasings.
+
+Its WORDING is a paraphrase, so do not build the query around a word whose meaning you had to infer — especially a verb. "Staff Exchange" cost us a whole story by being read as staff swapping employers when it meant an argument; a query for the wrong event matches nothing and looks exactly like a story nobody posted about. When a word could mean two things, leave it out and let the entities carry the search.
+
+Do not add lang: or -is: filters; those are added for you.${
+      failed.length
+        ? `
+
+ALREADY TRIED against the real X API, with what each actually returned:
+${failed.map((f) => `  ${f.found} post(s)  ${f.query}`).join("\n")}
+
+That is evidence, not noise. A query that came back empty was searching for something nobody posted — most often because a required group is the wrong word for this event, or because too many groups were ANDed and only posts containing all of them could match. Change the VOCABULARY, not the punctuation: drop the group you are least sure of, and try what a person posting about this would actually type. Do not repeat a query above.`
+        : ""
+    }`,
     (raw) => raw as { query: string },
   );
 
@@ -473,24 +498,32 @@ const STOPWORDS = new Set([
 ]);
 
 /**
- * The query to try when the model's query found nothing.
+ * The queries to try when the model's query didn't find enough, loosest last.
  *
- * `searchQueryFor` writes a precise query, and precise is exactly what fails
- * here: it ANDs several terms of a synthesised headline against posts that
- * phrase the story differently, and X returns an empty page. We watched this
- * happen to the user's #1 personalised trend — zero posts for the loudest story
- * on their timeline — and because an empty result is indistinguishable from
- * "nothing was posted about this", the board went on to state that as a finding.
+ * `searchQueryFor` writes a PRECISE query, and precision is what fails here. It
+ * ANDs several groups drawn from a headline that is itself a paraphrase — X
+ * synthesises these, so its nouns are approximate and its verbs are worse.
+ * Watched live on the user's own trends: "OpenAI and Anthropic Staff Exchange
+ * Over Account Suspension Mix-Up" became
+ * `OpenAI Anthropic (staff OR employee) (exchange OR swap OR trade) …`, which
+ * read "exchange" as staff SWAPPING EMPLOYERS when the story was an argument.
+ * Four ANDed groups, one of them about the wrong event: one post.
  *
- * So the fallback trades precision for the thing that actually matters at this
- * point: returning something real. OR rather than AND, proper nouns first
- * because those are what survive a rewording, and no `lang:` filter — a story
- * being discussed in another language is still the story.
+ * The instinct is then to OR everything, and that overcorrects into noise —
+ * `OpenAI OR Anthropic OR Staff OR Exchange` returns pay comparisons and
+ * funding rounds, which is worse than nothing because it looks like evidence.
  *
- * Model-free by design. It runs when a model call has already disappointed us,
- * and it must not be able to fail the same way twice.
+ * What actually works is one step looser than the model, not five: entities
+ * ORed together, ANDed with the topic ORed together. Two groups, so a post has
+ * to be about one of these things AND one of those, and no verb has to be
+ * guessed right. Measured across five live trends it returned 20 on-topic posts
+ * each, including the story that had defeated every other formulation.
+ *
+ * No `lang:` filter — a story discussed in another language is still the story.
+ * Model-free by design: this runs when a model call has already disappointed
+ * us, so it must not be able to fail the same way twice.
  */
-export function relaxedQuery(headline: string): string {
+export function fallbackQueries(headline: string): string[] {
   const words = headline
     // keep hashtags and handles whole; they're the highest-signal terms there are
     .replace(/[^\p{L}\p{N}\s#@]/gu, " ")
@@ -501,11 +534,22 @@ export function relaxedQuery(headline: string): string {
   // doesn't. Require two before trusting them, or a headline that happens to
   // start with one ordinary capitalised word searches for that word alone.
   const proper = words.filter((w) => /^[\p{Lu}#@]/u.test(w));
-  const terms = (proper.length >= 2 ? proper : words).slice(0, 4);
+  const entities = (proper.length >= 2 ? proper : words).slice(0, 3);
 
   // nothing usable — hand back the headline and let the caller report empty
-  if (!terms.length) return `${headline.slice(0, 100)} -is:retweet`;
-  return `${terms.join(" OR ")} -is:retweet`;
+  if (!entities.length) return [`${headline.slice(0, 100)} -is:retweet`];
+
+  const topic = words.filter((w) => !entities.includes(w)).slice(0, 5);
+  const or = (ws: string[]) => ws.join(" OR ");
+
+  return [
+    // the one that does the work
+    ...(topic.length ? [`(${or(entities)}) (${or(topic)}) -is:retweet`] : []),
+    // last resort, for a story whose topic words nobody reused. Noisy by
+    // construction, which is survivable only because the caller drops any
+    // claim these posts don't actually support.
+    `(${or(entities)}) -is:retweet`,
+  ];
 }
 
 /** Turn an x.com permalink into a real XPost we can render as a citation chip. */

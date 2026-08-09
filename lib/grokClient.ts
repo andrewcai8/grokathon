@@ -146,7 +146,8 @@ const SHARED_RULES = `- Label epistemic status honestly. One account's claim is 
 - Do not manufacture balance, and do not flatten real disagreement into consensus.`;
 
 const GROUNDING_RULES: Record<Grounding, string> = {
-  corpus: `The posts you are given are the ONLY ground truth. Never assert anything they do not support, and never cite an ID that is not in the supplied corpus.`,
+  corpus: `The posts AND the web sources you are given are the ground truth — both count as evidence, and for a factual claim the reporting is usually the stronger of the two. Never assert anything they do not support, never cite a post ID that is not in the supplied corpus, and never cite a web ref you were not given.
+- A claim carried only by the articles is properly grounded. Cite the refs and state it plainly; do not report an absence of evidence while holding sources that support it.`,
   search: `Ground truth is the posts you find with the x_search tool. Search thoroughly before concluding anything.
 - Cite only real posts you actually found. Every URL must be a permalink you saw in results, and every quote verbatim from that post. Never fabricate either.
 - Search first, conclude second. Do not report an absence of evidence until you have looked from more than one angle.

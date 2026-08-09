@@ -652,6 +652,34 @@ export async function POST(req: Request) {
      */
     const MIN_NOVEL_CORPUS = 5;
     const wantsFresh = node.depth >= 1 || corpus.length < MIN_NOVEL_CORPUS;
+
+    /**
+     * The web is fetched for every model-written expand.
+     *
+     * It used to hang off two conditions it has nothing to do with. It only ran
+     * when the POST corpus needed refreshing, so a root with a healthy timeline
+     * corpus — which is most roots on a warm board, and the cards people
+     * actually look at — never saw a single article. And it sat inside the X
+     * token check, so no X token meant no web either, though Exa needs nothing
+     * from X. Measured on a live board: five children across two root expands,
+     * zero web sources; the same story one level down cited Digg immediately.
+     *
+     * It is one parallel second and $0.007, so the honest default is to always
+     * ask and let the model use it or not.
+     */
+    const webPromise: Promise<WebSource[]> =
+      !XSEARCH_FORKS.has(fork) && hasExa()
+        ? searchWeb(node.title, {
+            numResults: 5,
+            // headline-derived query: journalism is what we want, and
+            // recency keeps a fast-moving story off last year's coverage
+            category: "news",
+            startPublishedDate: new Date(
+              Date.now() - 14 * 24 * 3600 * 1000,
+            ).toISOString(),
+          }).catch(() => [] as WebSource[])
+        : Promise.resolve([] as WebSource[]);
+
     if (wantsFresh && !XSEARCH_FORKS.has(fork)) {
       const tok = await activeToken();
       if (tok?.access_token) {
@@ -666,17 +694,7 @@ export async function POST(req: Request) {
               // and the model reads them in the order we hand them over
               .then((r) => rankEvidence(r.filter(isNew)))
               .catch(() => [] as XPost[]),
-            hasExa()
-              ? searchWeb(node.title, {
-                  numResults: 5,
-                  // headline-derived query: journalism is what we want, and
-                  // recency keeps a fast-moving story off last year's coverage
-                  category: "news",
-                  startPublishedDate: new Date(
-                    Date.now() - 14 * 24 * 3600 * 1000,
-                  ).toISOString(),
-                }).catch(() => [])
-              : Promise.resolve([]),
+            webPromise,
           ]);
           web = webFound;
           if (found.length || web.length) {
@@ -695,6 +713,9 @@ export async function POST(req: Request) {
         }
       }
     }
+
+    // whatever the X path did or didn't do, the articles stand on their own
+    if (!web.length) web = await webPromise;
 
     // fall back to x_search when the X API couldn't ground it, or for the
     // discovery forks
@@ -756,8 +777,19 @@ export async function POST(req: Request) {
      *
      * If EVERY child is uncited we keep one: that's the honest "nothing found
      * here" answer, which is a real result rather than a fabrication.
+     *
+     * A WEB source counts as evidence here, and the omission was quietly
+     * undoing the point of retrieving the web at all: a claim carrying three
+     * Bloomberg articles and no posts was deleted as unsupported, while the
+     * reporting is usually the better evidence for a factual claim. Web sources
+     * are also the safer half of the check — they are real by construction,
+     * resolved against the corpus we fetched, with unresolvable refs already
+     * dropped, so nothing here can be fabricated the way an x_search permalink
+     * can.
      */
-    const cited = children.filter((c) => c.source_post_ids.length > 0);
+    const cited = children.filter(
+      (c) => c.source_post_ids.length > 0 || (c.source_urls_meta?.length ?? 0) > 0,
+    );
     if (cited.length > 0 && cited.length < children.length) {
       console.warn(
         "[expand] dropped %d/%d claims left with no surviving evidence",

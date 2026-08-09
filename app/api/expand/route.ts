@@ -19,6 +19,8 @@ import {
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
 import { getPostsByIds, getReplies, searchRecent } from "@/lib/xClient";
+import { hasExa, searchWeb } from "@/lib/exaClient";
+import type { WebSource } from "@/lib/evidence";
 import {
   ForkSchema,
   type Board,
@@ -323,6 +325,7 @@ export async function POST(req: Request) {
     const grounded = citedPosts(board, nodeId).length > 0;
     let corpus = grounded ? relevantPosts(board, nodeId).filter(isNew) : [];
     let groundedNow = false;
+    let web: WebSource[] = [];
 
     /**
      * Fetch fresh evidence when the novel corpus runs dry.
@@ -356,8 +359,27 @@ export async function POST(req: Request) {
       if (tok?.access_token) {
         try {
           const q = await searchQueryFor(node.title);
-          const found = (await searchRecent(tok.access_token, q, 40)).filter(isNew);
-          if (found.length) {
+          // X and the web in parallel: what people are saying, and what was
+          // reported. For a factual claim the reporting is usually the better
+          // evidence, and it's real by construction either way.
+          const [found, webFound] = await Promise.all([
+            searchRecent(tok.access_token, q, 40)
+              .then((r) => r.filter(isNew))
+              .catch(() => [] as XPost[]),
+            hasExa()
+              ? searchWeb(node.title, {
+                  numResults: 5,
+                  // headline-derived query: journalism is what we want, and
+                  // recency keeps a fast-moving story off last year's coverage
+                  category: "news",
+                  startPublishedDate: new Date(
+                    Date.now() - 14 * 24 * 3600 * 1000,
+                  ).toISOString(),
+                }).catch(() => [])
+              : Promise.resolve([]),
+          ]);
+          web = webFound;
+          if (found.length || web.length) {
             // for a deep node the fresh posts ARE the evidence; padding with
             // unrelated timeline posts is what produced the dead ends
             corpus = node.depth >= 1 ? found : [...corpus, ...found];
@@ -391,13 +413,29 @@ export async function POST(req: Request) {
       newPosts = { ...newPosts, ...verified };
       summary = out.summary;
     } else {
-      const out = await expandNode(node, fork, corpus, ancestors, covered.titles);
+      const out = await expandNode(node, fork, corpus, ancestors, covered.titles, web);
       raw = out.children;
       summary = out.summary;
     }
 
     const postsForCitations = { ...board.posts, ...newPosts };
-    let children = childrenToNodes(node, raw, postsForCitations, fork);
+    let children = childrenToNodes(node, raw, postsForCitations, fork).map((c, i) => {
+      const refs = raw[i]?.source_web_ids ?? [];
+      const cited = refs
+        .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
+        .filter(Boolean);
+      return cited.length
+        ? {
+            ...c,
+            source_web_ids: undefined,
+            source_urls_meta: cited.map((w) => ({
+              url: w.url,
+              title: w.title,
+              siteName: w.siteName,
+            })),
+          }
+        : c;
+    });
 
     /**
      * Drop claims left with no evidence.

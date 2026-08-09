@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { webLine } from "./exaClient";
+import type { WebSource } from "./evidence";
 import {
   GrokClusterSchema,
   GrokExpandSchema,
@@ -97,6 +99,12 @@ const CHILD_PROPS = {
     items: { type: "string" },
     description:
       "Post IDs from the supplied corpus that evidence this node. REQUIRED for claims when any evidence exists. Never invent an ID.",
+  },
+  source_web_ids: {
+    type: "array",
+    items: { type: "string" },
+    description:
+      "refs (web1, web2...) of any WEB sources that evidence this node. Use [] if none. Never invent a ref.",
   },
   has_children: {
     type: "boolean",
@@ -269,6 +277,8 @@ export async function expandNode(
   ancestors: string[] = [],
   /** titles already on the board — children must not restate any of them */
   covered: string[] = [],
+  /** reported coverage from the open web, alongside the posts */
+  web: WebSource[] = [],
 ): Promise<{ children: GrokChild[]; summary?: string }> {
   const schema = {
     type: "object",
@@ -308,8 +318,9 @@ Children must be strictly more specific than the parent, and every one must carr
 ${covered.length ? `ALREADY ON THE BOARD — do not restate any of these, and do not make a child that is merely a narrower wording of one:\n${covered.slice(0, 40).map((t) => `- ${t}`).join("\n")}\n` : ""}
 Every claim that has evidence in the corpus must cite its post IDs. The posts below have been filtered to ones not yet cited anywhere on this board, so prefer them — that is where the new information is.
 
-AVAILABLE POSTS:
-${posts.map(postLine).join("\n\n")}`;
+AVAILABLE POSTS (what people are saying):
+${posts.length ? posts.map(postLine).join("\n\n") : "(none)"}
+${web.length ? `\nWEB SOURCES (what was reported — often the more reliable evidence for a factual claim):\n${web.map((w, i) => webLine(w, `web${i + 1}`)).join("\n\n")}` : ""}`;
 
   const out = await structured("expand_children", schema, content, (raw) => ({
     ...GrokExpandSchema.parse(raw),

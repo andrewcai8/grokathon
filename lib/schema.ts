@@ -186,6 +186,7 @@ export const GrokChildSchema = z.object({
   priority: z.number(),
   generality: z.number(),
   source_post_ids: z.array(z.string()),
+  source_web_ids: z.array(z.string()).optional(),
   has_children: z.boolean(),
   epistemic: EpistemicStatusSchema,
 });

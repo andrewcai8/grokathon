@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useBoard } from "@/lib/store";
 
 /**
@@ -52,16 +52,25 @@ export function OptionImage({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const asked = useRef(false);
 
+  /**
+   * Dedupe on the request, never on the mount.
+   *
+   * The obvious guard — a ref saying "already asked" — is wrong under React's
+   * double-invoked dev effects: the first pass sets the ref and its cleanup
+   * marks itself stale, the second pass sees the ref and returns, and the image
+   * that WAS generated gets discarded by the first pass's own staleness check.
+   * The picture is paid for and then thrown away, silently, every time.
+   *
+   * So `inflight` does the deduping by prompt, and the result is written to the
+   * store unconditionally — a store write is idempotent and safe after unmount,
+   * and the card is keyed by node id, so nothing can land on the wrong one.
+   */
   useEffect(() => {
-    if (url || !prompt || asked.current) return;
-    asked.current = true;
+    if (url || !prompt) return;
     let live = true;
     requestImage(prompt)
-      .then((got) => {
-        if (live) useBoard.getState().setMedia(nodeId, got);
-      })
+      .then((got) => useBoard.getState().setMedia(nodeId, got))
       .catch((err: unknown) => {
         if (live) setError(err instanceof Error ? err.message : "image failed");
       });

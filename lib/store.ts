@@ -79,23 +79,39 @@ function relayout(
 }
 
 /**
- * Keep a slab of the board on screen no matter how hard you fling it. Ancestors
- * are still free to clip off the left edge — that's the reference behaviour —
- * but you can never lose the board entirely, which on stage would be fatal.
+ * The canvas pans freely, in every direction, without end.
+ *
+ * There used to be a clamp that kept a slab of the board on screen so you could
+ * never fling it away entirely. It worked, but it tied how far you could travel
+ * to the board's own size times the zoom — so the reachable distance changed
+ * every time you zoomed, and a short board stopped dead after a couple of
+ * hundred pixels. Nothing was ever unreachable, but "the canvas stops here, and
+ * where here is depends on the zoom" is not a thing a canvas should do.
+ *
+ * Flying off into empty space is recoverable — 0 resets the view, and the TOC
+ * jumps to any node — so the freedom costs nothing that a keystroke can't undo.
  */
-const KEEP_VISIBLE = 220;
-
 function clampPan(
   pan: { x: number; y: number },
-  s: { layout: Layout | null; zoom: number; viewport: { w: number; h: number } },
+  _s: { layout: Layout | null; zoom: number; viewport: { w: number; h: number } },
 ) {
-  if (!s.layout) return pan;
-  const w = s.layout.width * s.zoom;
-  const h = s.layout.height * s.zoom;
-  return {
-    x: Math.min(s.viewport.w - KEEP_VISIBLE, Math.max(KEEP_VISIBLE - w, pan.x)),
-    y: Math.min(s.viewport.h - KEEP_VISIBLE, Math.max(KEEP_VISIBLE - h, pan.y)),
-  };
+  return pan;
+}
+
+/**
+ * Throw away a measured height so the estimate is used again for one frame.
+ *
+ * A trending root starts with no citations, so it draws no media frame, and
+ * that media-less height gets measured and cached. Then its first expand rolls
+ * its children's verified posts up onto it — and if any of them carries a
+ * picture, the root suddenly has one. Because a measured height short-circuits
+ * the estimate, the growth couldn't land until the ResizeObserver fired a
+ * frame later, dropping a 200px hole into a column that had already started
+ * animating. Forgetting the measurement makes the space appear on the SAME
+ * frame as the children, which is the rule the skeletons already follow.
+ */
+export function forgetHeight(id: string) {
+  delete heights[id];
 }
 
 export function reportHeight(id: string, h: number) {
@@ -152,7 +168,24 @@ export const useBoard = create<BoardState>((set, get) => ({
   setBoard: (board) => {
     const expanded = new Set<string>();
     const pending = new Set<string>();
-    set({ board, expanded, pending, layout: relayout(board, expanded, pending) });
+    set({
+      board,
+      expanded,
+      pending,
+      layout: relayout(board, expanded, pending),
+      /**
+       * A new board is a new space, so the camera comes with it.
+       *
+       * Keeping the old pan parked a freshly-loaded board outside its own
+       * clamp: switching from a tall board to a shorter one left pan.y already
+       * at the new board's floor, so the first scroll moved nothing and the
+       * cards sat shoved off the top edge. It reads as "the board is stuck",
+       * which is indistinguishable from broken — and it isn't a clamp bug, it's
+       * a stale viewpoint. ZoomSurface re-seats column 0 from pan {0,0}.
+       */
+      zoom: DEFAULT_ZOOM,
+      pan: { x: 0, y: 0 },
+    });
   },
 
   setMedia: (nodeId, url) => {
@@ -174,23 +207,48 @@ export const useBoard = create<BoardState>((set, get) => ({
     const parent = nodes[parentId];
     if (!parent) return;
 
-    for (const child of children) nodes[child.id] = child;
+    // Order the arriving batch here, once. The layout renders children_ids in
+    // order, so a fork appends BELOW what's already open instead of a
+    // high-priority counter jumping above children you've read. Most server
+    // paths already sort, but the ones that don't (media, replies) shouldn't
+    // have to know that the column's order depends on it.
+    const batch = [...children].sort((a, b) => b.priority - a.priority);
+    for (const child of batch) nodes[child.id] = child;
     // a trending root has no posts of its own; it adopts its children's
     // verified citations so every card on the board carries grounding
     nodes[parentId] = rollUpCitations(
       {
         ...parent,
-        // a fork ADDS a branch alongside what's already open; it doesn't replace it
+        /**
+         * A fork ADDS a branch alongside what's already open; it doesn't
+         * replace it. But a second click on the same fork is served from the
+         * graph, and appending those ids again wired the same child in twice —
+         * two identical cards, and React warning about duplicate keys. The
+         * server-side cache was written to prevent exactly this and can't:
+         * only the client knows what it already merged.
+         */
         children_ids: append
-          ? [...parent.children_ids, ...children.map((c) => c.id)]
-          : children.map((c) => c.id),
+          ? [
+              ...parent.children_ids,
+              ...batch
+                .map((c) => c.id)
+                .filter((id) => !parent.children_ids.includes(id)),
+            ]
+          : batch.map((c) => c.id),
         body: parent.body || summary,
         axis: axis ?? parent.axis,
         has_children: true,
         updated_at: new Date().toISOString(),
       },
-      children,
+      batch,
     );
+
+    // rollUpCitations may have just given this card its first citations — and
+    // with them its first picture. Its measured height predates both, so drop
+    // it and let the estimate reserve the frame on THIS frame. See forgetHeight.
+    if (nodes[parentId].source_post_ids.length !== parent.source_post_ids.length) {
+      forgetHeight(parentId);
+    }
 
     const next: Board = {
       ...board,
@@ -305,7 +363,9 @@ export const FORK_LABEL: Record<Fork, string> = {
   counter: "Counters",
   primary_only: "Primary only",
   people: "People",
-  media: "Media",
+  // a model read the picture — say so, the same way a generated image is
+  // marked. Nobody should have to guess which cards came from looking.
+  media: "Vision",
   falsifiers: "What would change my mind",
 };
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useBoard } from "@/lib/store";
 import { lodFor, clamp, frameRect } from "@/lib/lod";
 import { CARD_GAP, CARD_W, COL_GAP, LEFT_PAD } from "@/lib/layout";
+import { readMediaUrls } from "@/lib/media";
 import { BranchCard } from "./BranchCard";
 import { GhostColumn } from "./GhostColumn";
 import { SkeletonCard } from "./SkeletonCard";
@@ -297,6 +298,16 @@ export function ZoomSurface() {
           posts: s.board?.posts,
           // ...and what the board is FOR, for exactly the same reason
           kind: s.board?.kind,
+          /**
+           * Images the board has already read.
+           *
+           * The server strips these itself from its own graph, but it only has
+           * a graph when it happens to own this node — the same reason we send
+           * the node at all. Watched vision read one screenshot twice because
+           * of it. Novelty is structural, so the fact travels with the request
+           * rather than depending on which side remembers.
+           */
+          readMedia: s.board ? [...readMediaUrls(s.board)] : [],
         }),
       })
         .then(async (r) => {
@@ -344,9 +355,31 @@ export function ZoomSurface() {
     [revealColumn, revealChildColumnOf],
   );
 
+  /**
+   * A fork you've already run is already on the board.
+   *
+   * The server caches this too, but only when it happens to own the node —
+   * and when it doesn't, a second click ran the whole fork again and grafted a
+   * second copy of the same branch. Vision made that impossible to miss: two
+   * cards, same screenshot, two rewordings of one reading. The client always
+   * knows what it merged, so the check belongs here as well.
+   */
   const onFork = useCallback(
-    (id: string, fork: string) => requestExpand(id, fork, true),
-    [requestExpand],
+    (id: string, fork: string) => {
+      const s = useBoard.getState();
+      const node = s.board?.nodes[id];
+      const existing = node?.children_ids.filter(
+        (cid) => s.board?.nodes[cid]?.fork === fork,
+      );
+      if (existing?.length) {
+        s.select(id);
+        s.expand(id);
+        requestAnimationFrame(() => revealColumn(existing[0]));
+        return;
+      }
+      requestExpand(id, fork, true);
+    },
+    [requestExpand, revealColumn],
   );
 
   const onToggle = useCallback(

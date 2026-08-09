@@ -45,6 +45,7 @@ Absolute rules:
 - The web pages you are given are the ONLY ground truth. Every option must be something those pages actually describe, and every attribute value must come from them. Never invent a product, a price or a spec that is not in the sources.
 - An option is a CHOICE, not a claim. It is not true or false. Do not hedge, do not weigh evidence, do not label anything contested. Say what the thing is and what it costs you.
 - The three options must be genuinely DIFFERENT DIRECTIONS, not variations of one thing. If two of them would suit the same person for the same reason, replace one. Divide the space; do not sample it.
+- All three must be points on the SAME named axis — mutually exclusive, and together covering the space. Three options taken from three different dimensions (a size, then a body style, then a fuel type) is a grab bag, not a division: the person can no longer tell which question they are answering, and the options overlap so picking one doesn't rule the others out. Where the space has a simple ordered axis — small / medium / large, cheap / mid / premium, short / medium / long — prefer it: it is instantly legible and obviously complete.
 - Every option must be strictly one level more specific than the parent, and must be a real choice a person could actually make.
 - Attributes are what make a choice decidable: the 2-4 facts a person would genuinely compare. Their labels must be IDENTICAL across all three options, in the same order, so the three can be read down a column against each other. A fact only one option has is not a comparison — leave it out.
 - Every attribute must DISCRIMINATE. If a value would read the same on all three cards it is telling the reader nothing: drop it and find one that differs. Never restate the constraint they already gave — "under $30,000" on a card inside a $30,000 search is a wasted row.
@@ -111,7 +112,10 @@ export async function optionCorpus(
   usedUrls: Set<string>,
 ): Promise<{ web: WebSource[]; query: string }> {
   const query = await optionQueryFor(title, ancestors);
-  const found = await searchWeb(query, { numResults: 8, maxCharacters: 1200 });
+  // 6 x 1000 rather than 8 x 1200: the larger corpus pushed one expand past the
+  // SDK's 60s ceiling and returned "Request timed out", and the extra pages were
+  // adding length rather than distinct options. Latency IS the product here.
+  const found = await searchWeb(query, { numResults: 6, maxCharacters: 1000 });
   return { web: found.filter((w) => !usedUrls.has(w.url)), query };
 }
 
@@ -121,6 +125,13 @@ export async function expandOptions(
   /** titles already on the board — options must not restate any of them */
   covered: string[],
   web: WebSource[],
+  /**
+   * Directions already offered at this level, when this call is EXTENDING a set
+   * rather than creating one. Without it the model re-divides a space it has
+   * already divided and hands back synonyms — "Small cars" for "Compact cars" —
+   * which pass the novelty check on exact titles while adding nothing.
+   */
+  extend?: string[],
 ): Promise<{ summary?: string; axis?: string; options: OptionChild[] }> {
   const schema = {
     type: "object",
@@ -217,6 +228,21 @@ ${ancestors.length ? `NARROWING DOWN SO FAR (most general first):\n${ancestors.j
 ${node.title}${node.body ? `\n${node.body}` : ""}
 
 Pick ONE dimension to divide this category along, name it in "axis", then give the ${MAX_CHILDREN} options that divide it best. Different directions, not variations: someone choosing between them should face a real trade-off, not a preference between near-identical things.
+
+${
+  extend?.length
+    ? `These directions are ALREADY on offer at this level:
+${extend.map((t) => `- ${t}`).join("\n")}
+
+CONTINUE that same division — do not start a new one, and do not rename one of the above. Give the directions that set leaves out. If it genuinely covers the space with nothing meaningful left over, return fewer options, or none at all: "that's all of them" is a real answer and a far better one than three synonyms.
+
+`
+    : ancestors.length
+      ? ""
+      : `This is the FIRST split, so divide the space at its BROADEST useful level: the kinds of thing a person could choose between, not individual products. Naming three specific products now silently discards every alternative they haven't considered yet — and they will never know what was thrown away. The specific ones are earned later, once a direction has been picked.
+
+`
+}
 
 Constraints stated further up (budget, use case, timing) still apply — never offer an option that violates one.
 

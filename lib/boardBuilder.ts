@@ -1,5 +1,5 @@
 import type { Board, BranchNode, Fork, GrokChild, GrokCluster, XPost } from "./schema";
-import type { WebSource } from "./evidence";
+import { rankEvidence, type WebSource } from "./evidence";
 import type { OptionChild } from "./optionsExpander";
 import type { XTrend } from "./xClient";
 
@@ -32,7 +32,9 @@ export function buildBoard(
   const nodes: Record<string, BranchNode> = {};
   const rootIds: string[] = [];
 
-  for (const t of cluster.topics) {
+  // ordered here, once: the layout reads root_ids as-is so later batches append
+  // to the foot of the column instead of interleaving with what's already read
+  for (const t of [...cluster.topics].sort((a, b) => b.priority - a.priority)) {
     const id = newId("t");
     rootIds.push(id);
     nodes[id] = {
@@ -82,7 +84,10 @@ export function buildBoardFromTrends(
   const top = trends.slice(0, opts.limit);
   const busiest = Math.max(1, ...top.map((t) => t.postCount));
 
-  for (const trend of top) {
+  // X's own order decides WHICH trends make the cut (it's personalised); volume
+  // decides how they read down the column. Ordering here rather than in the
+  // layout is what lets a later batch append to the bottom — see computeLayout.
+  for (const trend of [...top].sort((a, b) => b.postCount - a.postCount)) {
     const id = newId("t");
     rootIds.push(id);
     nodes[id] = {
@@ -251,9 +256,16 @@ export function optionsToNodes(
     // refs come back as "web3"; resolve against the corpus we actually
     // retrieved, and drop anything that doesn't resolve rather than rendering
     // a source we can't stand behind
-    const cited = (o.source_web_ids ?? [])
-      .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
-      .filter(Boolean);
+    // deduped by URL: the model repeats a ref often enough that two chips for
+    // one page reached the card, which reads as two sources and isn't
+    const cited = [
+      ...new Map(
+        (o.source_web_ids ?? [])
+          .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
+          .filter(Boolean)
+          .map((w) => [w.url, w] as const),
+      ).values(),
+    ];
 
     return {
       id,
@@ -301,20 +313,37 @@ export function optionsToNodes(
 export function coveredGround(
   board: Board,
   excludeNodeId?: string,
-): { postIds: Set<string>; urls: Set<string>; titles: string[] } {
+): {
+  postIds: Set<string>;
+  urls: Set<string>;
+  mediaUrls: Set<string>;
+  titles: string[];
+} {
   const postIds = new Set<string>();
   // web sources get the same treatment as posts: an options board that keeps
   // re-reading the same buying guide produces the same three cars three levels
   // running, which is the exact failure the post rule was written to stop
   const urls = new Set<string>();
+  /**
+   * Images the board has already read.
+   *
+   * An image is a source, so it obeys the same rule as a post: once it's been
+   * used, it's stripped before the model sees it. Watched this fail live —
+   * running vision on a parent and then on its child sent the same two
+   * pictures twice and produced two rewordings of the same reading, which is
+   * exactly the "depth is a thesaurus" failure the post rule exists to stop.
+   * A vision node records the URL it read, so this costs nothing to know.
+   */
+  const mediaUrls = new Set<string>();
   const titles: string[] = [];
   for (const n of Object.values(board.nodes)) {
     if (n.id === excludeNodeId) continue;
     for (const id of n.source_post_ids) postIds.add(id);
     for (const w of n.source_urls_meta ?? []) urls.add(w.url);
+    if (n.media?.url && n.media.vision_summary) mediaUrls.add(n.media.url);
     titles.push(n.title);
   }
-  return { postIds, urls, titles };
+  return { postIds, urls, mediaUrls, titles };
 }
 
 /**
@@ -347,7 +376,10 @@ export function relevantPosts(board: Board, nodeId: string, limit = 40): XPost[]
   // top up with the rest of the corpus so Grok can find genuinely new evidence
   const picked = [...ids].map((id) => board.posts[id]).filter(Boolean);
   if (picked.length < limit) {
-    for (const p of Object.values(board.posts)) {
+    // the top-up is where the cap actually bites — a hundred timeline posts
+    // competing for forty slots used to be decided by object key order. Rank
+    // them, so what survives is the evidence worth reading (see rankEvidence).
+    for (const p of rankEvidence(Object.values(board.posts))) {
       if (picked.length >= limit) break;
       if (!ids.has(p.id)) picked.push(p);
     }

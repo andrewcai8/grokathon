@@ -31,6 +31,20 @@ export function SeedBar({
   const [question, setQuestion] = useState("");
 
   /**
+   * Which kind of board you're steering.
+   *
+   * Held separately from the board's own kind because you need to be able to
+   * stand in the options pane while a news board is still on screen — that's
+   * the whole moment of typing a question. It follows the board whenever the
+   * board changes underneath you, so the rail never claims you're somewhere
+   * you aren't.
+   */
+  const [pane, setPane] = useState<"news" | "options">(board?.kind ?? "news");
+  useEffect(() => {
+    if (board?.kind) setPane(board.kind);
+  }, [board?.kind]);
+
+  /**
    * The other kind of board.
    *
    * Same surface, same zoom, same recursion — it just narrows instead of
@@ -69,7 +83,7 @@ export function SeedBar({
       .catch(() => {});
   }, []);
 
-  const reseed = async (url: string, what: string) => {
+  const reseed = async (url: string, what: string, quiet = false) => {
     setBusy(what);
     setError(null);
     try {
@@ -80,11 +94,13 @@ export function SeedBar({
         if (data.source === "fixtures" || data.source === "fixtures_fallback") {
           setError("fell back to fixtures — check the server log");
         }
-      } else {
-        setError("no board returned");
+        return true;
       }
+      if (!quiet) setError(data?.error ?? "no board returned");
+      return false;
     } catch {
-      setError("request failed");
+      if (!quiet) setError("request failed");
+      return false;
     } finally {
       setBusy(null);
     }
@@ -109,9 +125,70 @@ export function SeedBar({
     e.currentTarget.style.color = "var(--gb-dim)";
   };
 
+  /**
+   * The two things this surface can be pointed at.
+   *
+   * Both are the same board — same layout, same zoom, same recursion — so this
+   * is a switch of subject, not of mode: what's happening on X, or a decision
+   * you're trying to make. Naming them as a pair is also the clearest statement
+   * that the paradigm generalises, which is otherwise invisible until you type
+   * something into it.
+   */
+  const tab = (id: "news" | "options", label: string) => (
+    <button
+      key={id}
+      onClick={() => {
+        setError(null);
+        setPane(id);
+        // A toggle that changes the sidebar but not the canvas reads as broken,
+        // so both directions actually move the board. Each kind keeps its own
+        // warm snapshot, so this is a disk read either way — instant.
+        if (id === "news" && board?.kind === "options") {
+          void reseed("/api/seed?snapshot=latest", "snap");
+        }
+        if (id === "options" && board?.kind !== "options") {
+          /**
+           * The preset first, your last board second.
+           *
+           * Building one costs two Grok calls, a web search and three images,
+           * so landing on a cold prompt makes the whole second half of the
+           * product look like it hasn't started. The preset is a real board
+           * built through the real pipeline, with its pictures already on disk
+           * — so this is a disk read, and Decide cuts instantly.
+           *
+           * Quietly, in both cases: if neither exists there is nothing to
+           * restore, and the prompt below is the answer rather than an error.
+           */
+          void reseed("/api/seed?snapshot=options-preset", "lastopts", true).then(
+            (ok) =>
+              ok || reseed("/api/seed?snapshot=options-latest", "lastopts", true),
+          );
+        }
+      }}
+      className="gb-label flex-1 border px-2 py-[7px] transition-colors"
+      style={{
+        borderColor: pane === id ? "var(--gb-text)" : "var(--gb-line)",
+        color: pane === id ? "var(--gb-text)" : "var(--gb-dim)",
+        background: pane === id ? "rgba(255,255,255,0.06)" : "transparent",
+        borderRadius: 2,
+      }}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div className="px-5 py-4" style={{ borderTop: "1px solid var(--gb-line)" }}>
-      {me?.connected ? (
+      <div className="mb-3 flex gap-1.5">
+        {tab("news", "Your day")}
+        {tab("options", "Decide")}
+      </div>
+
+      {/* The X status block belongs to the X board. Gating only its first
+          branch dropped through to the "Connect X" call-to-action while you
+          were already connected — the rail telling you to link an account you
+          had linked, on a board that doesn't use it. */}
+      {pane !== "news" ? null : me?.connected ? (
         <div className="gb-label mb-3 flex items-center gap-2">
           <span
             className="h-[5px] w-[5px] rounded-full"
@@ -140,7 +217,7 @@ export function SeedBar({
         </div>
       )}
 
-      <div className="flex flex-col gap-1.5">
+      <div className={`flex flex-col gap-1.5 ${pane === "news" ? "" : "hidden"}`}>
         {me?.connected ? (
           <button
             onClick={() => reseed("/api/seed?live=1", "live")}
@@ -165,9 +242,9 @@ export function SeedBar({
         </button>
       </div>
 
-      <div className="mt-4 pt-3" style={{ borderTop: "1px solid var(--gb-line)" }}>
+      <div className={pane === "options" ? "" : "hidden"}>
         <div className="gb-label mb-2" style={{ color: "var(--gb-faint)" }}>
-          Narrow it down
+          What are you trying to decide?
         </div>
         <input
           value={question}
@@ -202,6 +279,19 @@ export function SeedBar({
           onMouseLeave={hoverOff}
         >
           {busy === "narrow" ? "Searching the web…" : "→ Give me three options"}
+        </button>
+        {/* A fresh options board costs two Grok calls and a web search, so the
+            last one is kept warm on disk exactly like the X board is. On stage
+            this is the difference between a 25s wait and an instant cut. */}
+        <button
+          onClick={() => reseed("/api/seed?snapshot=options-latest", "lastopts")}
+          disabled={Boolean(busy)}
+          className={`${action} mt-1.5`}
+          style={actionStyle}
+          onMouseEnter={hoverOn}
+          onMouseLeave={hoverOff}
+        >
+          {busy === "lastopts" ? "Loading…" : "◧ Last decision board"}
         </button>
       </div>
 

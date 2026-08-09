@@ -96,3 +96,38 @@ export const BOARD_KINDS: Record<BoardKind, BoardKindSpec> = {
 export function isContestable(kind: BoardKind | undefined) {
   return BOARD_KINDS[kind ?? "news"].contestable;
 }
+
+/**
+ * Which posts get to be the evidence.
+ *
+ * Every retrieval returns more than a card can carry — 40 search hits, 100
+ * timeline posts — and something has to choose. Until now that was insertion
+ * order, i.e. nothing.
+ *
+ * Reach, log-scaled so a viral post doesn't erase forty ordinary ones, plus a
+ * deliberate thumb on the scale for posts carrying media. Two reasons, and the
+ * second is the one that matters:
+ *
+ *   1. A post people bothered to attach a chart, a screenshot or a video to is
+ *      usually a post making an argument rather than reacting to one.
+ *   2. It is the only evidence on the board we can go and read a second way.
+ *      A text post is fully spent the moment it's quoted; a post with an image
+ *      still has something in it the board hasn't shown, which is exactly what
+ *      the media fork is for. Preferring them means depth has somewhere to go.
+ *
+ * A thumb, not a rule: the multiplier is small enough that a text post with
+ * real traction still outranks a picture nobody looked at.
+ */
+export function evidenceScore(post: {
+  metrics?: { likes: number; reposts: number };
+  media?: unknown[];
+}): number {
+  const reach = (post.metrics?.likes ?? 0) + 2 * (post.metrics?.reposts ?? 0);
+  return Math.log10(1 + reach) * (post.media?.length ? 1.35 : 1);
+}
+
+export function rankEvidence<T extends { metrics?: { likes: number; reposts: number }; media?: unknown[] }>(
+  posts: T[],
+): T[] {
+  return [...posts].sort((a, b) => evidenceScore(b) - evidenceScore(a));
+}

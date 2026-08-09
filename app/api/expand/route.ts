@@ -5,9 +5,17 @@ import {
   expandViaXSearch,
   hasGrok,
   MAX_CHILDREN,
+  readMedia,
   searchQueryFor,
   XSEARCH_FORKS,
 } from "@/lib/grokClient";
+import {
+  MEDIA_CAP,
+  mediaFromPosts,
+  reachableMedia,
+  resolveRef,
+  type CardMediaItem,
+} from "@/lib/media";
 import {
   ancestorTitles,
   childrenToNodes,
@@ -18,7 +26,7 @@ import {
   rollUpCitations,
 } from "@/lib/boardBuilder";
 import { expandOptions, optionCorpus } from "@/lib/optionsExpander";
-import type { BoardKind } from "@/lib/evidence";
+import { rankEvidence, type BoardKind } from "@/lib/evidence";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
 import { getPostsByIds, getReplies, searchRecent } from "@/lib/xClient";
@@ -105,6 +113,13 @@ export async function POST(req: Request) {
     posts?: Record<string, XPost>;
     /** what the client's board is FOR, for the same reason it sends the node */
     kind?: BoardKind;
+    /**
+     * Image URLs the client's board has already had read. Same reason it sends
+     * the node: when the server doesn't own this board, its own notion of what
+     * has been covered is a graph of one node, and vision would happily read
+     * the same screenshot twice.
+     */
+    readMedia?: string[];
   };
   const nodeId = body.nodeId;
   if (!nodeId) {
@@ -244,6 +259,197 @@ export async function POST(req: Request) {
       console.error("[expand/options]", err);
       return NextResponse.json(
         { error: err instanceof Error ? err.message : "options expand failed" },
+        { status: 500 },
+      );
+    }
+  }
+
+  /**
+   * Vision — what the pictures on this card are arguing.
+   *
+   * Every other fork reads text. This one reads the part of a post nobody has
+   * read: on a real timeline a quarter of posts carry media and none of it
+   * carries alt text, so the image is simply missing from the board's account
+   * of what was said.
+   *
+   * The invariant survives intact because the model never chooses a source. We
+   * pick the images off posts we already retrieved, hand them over under
+   * opaque refs (m1, m2…), and map the ref it answers with back to the post on
+   * this side. A claim about an image we didn't show it has nowhere to land.
+   */
+  if (fork === "media") {
+    if (!hasGrok()) {
+      return NextResponse.json({ error: "XAI_API_KEY not set" }, { status: 503 });
+    }
+    // the node's own pictures first; a rolled-up root falls back to the posts
+    // its children cited, which are still posts behind this card
+    const behind = node.source_post_ids.length
+      ? node.source_post_ids.map((id) => board.posts[id]).filter(Boolean)
+      : citedPosts(board, nodeId);
+    const covered = coveredGround(board, nodeId);
+    const alreadyRead = new Set([...covered.mediaUrls, ...(body.readMedia ?? [])]);
+    const all = mediaFromPosts(behind);
+    // Images the board has already read are stripped before the model sees
+    // them, exactly as posts are. Novelty is structural, not remembered.
+    const found = mediaFromPosts(behind, MEDIA_CAP, alreadyRead);
+    if (!found.length) {
+      return NextResponse.json(
+        {
+          error: all.length
+            ? `already read every image behind this card (${all.length})`
+            : "no image on any post behind this card",
+        },
+        { status: 422 },
+      );
+    }
+
+    try {
+      // one dead URL 400s the whole call — see reachableMedia
+      const media = await reachableMedia(found);
+      if (!media.length) {
+        return NextResponse.json(
+          { error: `${found.length} image(s) behind this card, none still reachable` },
+          { status: 404 },
+        );
+      }
+
+      const ancestors = serverBoard?.nodes[nodeId]
+        ? ancestorTitles(board, nodeId)
+        : (body.ancestors ?? []);
+
+      const read = await readMedia(node, media, ancestors, covered.titles);
+
+      /**
+       * A vision claim must cite the post whose media it read.
+       *
+       * The ref is the only handle the model has on an image, so a ref that
+       * doesn't resolve means it described something it was not shown. Those
+       * are dropped, exactly as a fabricated permalink is.
+       */
+      const usedRefs = new Set<string>();
+      const paired = read
+        .map((c) => ({ child: c, m: resolveRef(media, c.media_ref) }))
+        .filter((p): p is { child: (typeof read)[number]; m: CardMediaItem } =>
+          Boolean(p.m),
+        )
+        // one card per image. Two readings of one picture render as two cards
+        // showing the same picture, which reads as a duplicate however
+        // different the words are.
+        .filter((p) => !usedRefs.has(p.m.ref) && usedRefs.add(p.m.ref));
+
+      if (paired.length < read.length) {
+        console.warn(
+          "[expand/media] dropped %d/%d vision claims citing an image we never sent",
+          read.length - paired.length,
+          read.length,
+        );
+      }
+      if (!paired.length) {
+        return NextResponse.json(
+          { error: "vision cited no image we sent" },
+          { status: 502 },
+        );
+      }
+
+      const posts = Object.fromEntries(
+        paired.map((p) => [p.m.postId, board.posts[p.m.postId]]).filter(([, v]) => v),
+      ) as Record<string, XPost>;
+
+      // Ordered here, once, before it reaches either the client or the server
+      // graph. The client sorts an arriving batch by priority; if the server
+      // stored the model's order instead, the snapshot would replay this column
+      // in a different vertical order than the person rehearsing it saw.
+      paired.sort((a, b) => b.child.priority - a.child.priority);
+
+      const children = childrenToNodes(
+        node,
+        paired.map((p) => ({
+          type: "media" as const,
+          title: p.child.title,
+          body: p.child.body,
+          priority: p.child.priority,
+          generality: 0,
+          source_post_ids: [p.m.postId],
+          has_children: true,
+          epistemic: p.child.epistemic,
+        })),
+        // childrenToNodes drops citations it can't resolve; the post is behind
+        // this card by construction, so make sure it's resolvable
+        { ...board.posts, ...posts },
+        fork,
+      ).map((c, i) => ({
+
+        ...c,
+        // the child carries the exact frame it was written from, so the card
+        // shows you the thing being described rather than describing it twice
+        media: {
+          kind: (paired[i].m.kind === "video" ? "video" : "image") as "video" | "image",
+          url: paired[i].m.url,
+          alt: paired[i].m.alt,
+          vision_summary: paired[i].child.body,
+          post_id: paired[i].m.postId,
+          // carried so a snapshotted vision card frames identically on replay,
+          // when the post it came from may no longer be in the corpus
+          width: paired[i].m.width,
+          height: paired[i].m.height,
+        },
+      }))
+        /**
+         * A vision claim MUST cite the post whose media it read.
+         *
+         * Today it always can — `behind` is drawn from `board.posts`, so
+         * childrenToNodes can always resolve the id. But that makes the
+         * invariant true by accident of plumbing rather than by rule, and if
+         * `behind` ever gains a source outside the corpus the id would be
+         * silently stripped and the card would ship with a picture, a
+         * confident reading of it, and no citation — rendering as merely
+         * uncited, which is indistinguishable from a properly sourced sibling.
+         * That is the exact failure mode the x_search verification pass exists
+         * to prevent, so it gets the same treatment: no citation, no card.
+         */
+        .filter((c) => {
+          if (c.source_post_ids.length) return true;
+          console.warn("[expand/media] dropped a vision claim with no citation");
+          return false;
+        });
+
+      if (!children.length) {
+        return NextResponse.json(
+          { error: "vision produced nothing citable" },
+          { status: 502 },
+        );
+      }
+
+      if (serverBoard?.nodes[nodeId]) patchBoard((b) =>
+        b.nodes[nodeId]
+          ? {
+              ...b,
+              nodes: {
+                ...b.nodes,
+                ...Object.fromEntries(children.map((c) => [c.id, c])),
+                [nodeId]: {
+                  ...b.nodes[nodeId],
+                  children_ids: [
+                    ...b.nodes[nodeId].children_ids,
+                    ...children.map((c) => c.id),
+                  ],
+                  updated_at: new Date().toISOString(),
+                },
+              },
+              posts: { ...b.posts, ...posts },
+            }
+          : b,
+      );
+      after(() => persistWarmedBoard(getBoard()));
+      console.log(
+        "[expand/media] %s: %d images sent (%d dead), %d claims",
+        node.title, media.length, found.length - media.length, children.length,
+      );
+      return NextResponse.json({ children, posts, fork, source: "x_vision" });
+    } catch (err) {
+      console.error("[expand/media]", err);
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "vision failed" },
         { status: 500 },
       );
     }
@@ -456,7 +662,9 @@ export async function POST(req: Request) {
           // evidence, and it's real by construction either way.
           const [found, webFound] = await Promise.all([
             searchRecent(tok.access_token, q, 40)
-              .then((r) => r.filter(isNew))
+              // rank before the corpus is capped: a search returns forty hits
+              // and the model reads them in the order we hand them over
+              .then((r) => rankEvidence(r.filter(isNew)))
               .catch(() => [] as XPost[]),
             hasExa()
               ? searchWeb(node.title, {
@@ -513,9 +721,17 @@ export async function POST(req: Request) {
     const postsForCitations = { ...board.posts, ...newPosts };
     let children = childrenToNodes(node, raw, postsForCitations, fork).map((c, i) => {
       const refs = raw[i]?.source_web_ids ?? [];
-      const cited = refs
-        .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
-        .filter(Boolean);
+      // the model cites "web2" twice more often than you'd hope; dedupe by URL
+      // or the card renders the same outlet twice and React sees two nodes
+      // under one key
+      const cited = [
+        ...new Map(
+          refs
+            .map((r) => web[Number(String(r).replace(/\D/g, "")) - 1])
+            .filter(Boolean)
+            .map((w) => [w.url, w] as const),
+        ).values(),
+      ];
       return cited.length
         ? {
             ...c,

@@ -15,6 +15,9 @@ import { useBoard } from "@/lib/store";
 export function MoreRootsCard({ y }: { y: number }) {
   const loading = useBoard((s) => s.loadingRoots);
   const exhausted = useBoard((s) => s.rootsExhausted);
+  // the affordance is the same on both kinds of board; only what it fetches,
+  // and therefore what it should promise, differs
+  const isOption = useBoard((s) => s.board?.kind) === "options";
 
   if (exhausted) return null;
 
@@ -62,12 +65,12 @@ export function MoreRootsCard({ y }: { y: number }) {
               className="gb-pulse h-[4px] w-[4px] rounded-full"
               style={{ background: "var(--gb-live)" }}
             />
-            Reading more of your day
+            {isOption ? "Finding more directions" : "Reading more of your day"}
           </>
         ) : (
           <>
             <span>+</span>
-            More of your day
+            {isOption ? "More directions" : "More of your day"}
           </>
         )}
       </div>
@@ -76,7 +79,12 @@ export function MoreRootsCard({ y }: { y: number }) {
           className="gb-detail mt-2 text-[11.5px] leading-[1.45]"
           style={{ color: "var(--gb-faint)" }}
         >
-          Next trends, then what your timeline is saying that isn&rsquo;t here yet
+          {/* Three roots is what's legible on open, not what exists — on a
+              decision that means directions you haven't been offered yet, on
+              the same question and the same axis. */}
+          {isOption
+            ? "Other directions on this question that aren’t here yet"
+            : "Next trends, then what your timeline is saying that isn’t here yet"}
         </div>
       ) : null}
     </div>

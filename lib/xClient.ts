@@ -15,7 +15,16 @@ const API = "https://api.x.com/2";
 const TWEET_FIELDS =
   "created_at,text,public_metrics,conversation_id,referenced_tweets,attachments,author_id,lang";
 const USER_FIELDS = "name,username,profile_image_url,verified";
-const MEDIA_FIELDS = "media_key,type,url,preview_image_url,alt_text";
+/**
+ * width/height are load-bearing, not nice-to-have: the card sizes each frame
+ * from the real aspect ratio, which is the only way media can be laid out to
+ * its true shape AND remain deterministic — we know the box before a single
+ * byte of the image arrives, so the band layout never reflows. They also let
+ * us drop thumbnails too small to be worth the space. duration_ms is what the
+ * card prints on a video preview.
+ */
+const MEDIA_FIELDS =
+  "media_key,type,url,preview_image_url,alt_text,width,height,duration_ms";
 const EXPANSIONS =
   "author_id,referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys";
 
@@ -32,6 +41,9 @@ interface RawMedia {
   url?: string;
   preview_image_url?: string;
   alt_text?: string;
+  width?: number;
+  height?: number;
+  duration_ms?: number;
 }
 interface RawTweet {
   id: string;
@@ -94,6 +106,9 @@ function normalize(json: RawResponse): XPost[] {
             : "photo") as "photo" | "video" | "animated_gif",
         url: m.url ?? m.preview_image_url ?? "",
         alt: m.alt_text,
+        width: m.width,
+        height: m.height,
+        duration_ms: m.duration_ms,
       }))
       .filter((m) => m.url);
 

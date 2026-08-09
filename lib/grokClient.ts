@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { webLine } from "./exaClient";
 import type { WebSource } from "./evidence";
+import type { CardMediaItem } from "./media";
 import {
   GrokClusterSchema,
   GrokExpandSchema,
@@ -166,7 +167,13 @@ function postLine(p: XPost) {
   const m = p.metrics
     ? ` [${p.metrics.likes} likes, ${p.metrics.reposts} reposts, ${p.metrics.replies} replies]`
     : "";
-  return `id:${p.id} @${p.author.handle} (${p.author.name})${m}\n${p.text}`;
+  // Say that a post carries pictures without pretending to know what's in them.
+  // The card will render them, and the media fork can go and read them; here it
+  // is only a signal that this post is carrying more than its text.
+  const media = p.media?.length
+    ? ` [+${p.media.length} ${p.media[0].kind === "photo" ? "image" : p.media[0].kind}${p.media.length > 1 ? "s" : ""}, contents unread]`
+    : "";
+  return `id:${p.id} @${p.author.handle} (${p.author.name})${m}${media}\n${p.text}`;
 }
 
 export async function structured<T>(
@@ -621,3 +628,162 @@ export const XSEARCH_FORKS: ReadonlySet<Fork> = new Set<Fork>([
   "falsifiers",
   "people",
 ]);
+
+// ---------------------------------------------------------------------------
+// Vision — "what is this image arguing?"
+//
+// Verified against the live API before any of this was written, because the
+// shape differs from every other call in this file:
+//   - /v1/responses ONLY. chat.completions accepts the old
+//     {type:"image_url", image_url:{url}} spelling too, but the Responses API
+//     is where structured output and images coexist.
+//   - content parts are {type:"input_image", image_url:"<url>", detail:"high"}
+//     — image_url is a bare STRING here, not an object.
+//   - structured output rides along via text.format, same as x_search.
+//   - measured: 6 images, low effort, ~7s, ~$0.04.
+//   - ONE unreachable URL 400s the whole request
+//     ("image_download_error"), which is why callers pass media through
+//     reachableMedia() first.
+//
+// xAI fetches pbs.twimg.com server-side without a token, confirmed on real
+// timeline media — so we hand over URLs rather than proxying bytes.
+// ---------------------------------------------------------------------------
+
+const MEDIA_CHILD = {
+  type: "object",
+  properties: {
+    media_ref: {
+      type: "string",
+      description:
+        "The ref (m1, m2...) of the image this node is about. Must be one you were actually shown.",
+    },
+    title: CHILD_PROPS.title,
+    body: {
+      type: "string",
+      description:
+        "2-3 sentences on what the image shows and what it is being used to argue. Describe what is visibly in it, not what you assume from the caption.",
+    },
+    priority: CHILD_PROPS.priority,
+    epistemic: {
+      type: "string",
+      enum: EPISTEMIC_ENUM,
+      description:
+        "One image from one account is thin_evidence — that is the default. Use contested only when the image's authenticity or meaning is itself in dispute. note_flagged only if it is visibly a Community Note or a correction.",
+    },
+  },
+  required: ["media_ref", "title", "body", "priority", "epistemic"],
+  additionalProperties: false,
+} as const;
+
+export interface VisionChild {
+  media_ref: string;
+  title: string;
+  body: string;
+  priority: number;
+  epistemic: GrokChild["epistemic"];
+}
+
+/**
+ * Read the pictures on a card's posts and say what they depict or assert.
+ *
+ * This is the one fork where the evidence is not text. The posts these images
+ * hang off are already on the board — what's new is the part of them nobody
+ * has read, which on a real timeline is most of it: 25 of 99 posts carried
+ * media and none of them carried alt text.
+ */
+export async function readMedia(
+  node: BranchNode,
+  media: CardMediaItem[],
+  ancestors: string[] = [],
+  covered: string[] = [],
+): Promise<VisionChild[]> {
+  const schema = {
+    type: "object",
+    properties: {
+      children: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_CHILDREN,
+        items: MEDIA_CHILD,
+      },
+    },
+    required: ["children"],
+    additionalProperties: false,
+  };
+
+  const content: Record<string, unknown>[] = [
+    {
+      type: "input_text",
+      text: `${ancestors.length ? `CONTEXT: ${ancestors.join(" > ")}\n\n` : ""}CARD
+title: ${node.title}
+body: ${node.body ?? "(none)"}
+
+Below are the ${media.length} image${media.length === 1 ? "" : "s"} attached to the posts behind this card. Each is labelled with its ref, who posted it, and what they wrote alongside it.`,
+    },
+  ];
+
+  for (const m of media) {
+    content.push({
+      type: "input_text",
+      text: `\n${m.ref} — ${m.kind === "photo" ? "image" : `${m.kind} (this is the preview frame)`} posted by @${m.handle}: "${m.text}"${m.alt ? `\nalt text: ${m.alt}` : ""}`,
+    });
+    content.push({ type: "input_image", image_url: m.url, detail: "high" });
+  }
+
+  content.push({
+    type: "input_text",
+    text: `\nReturn AT MOST ${MAX_CHILDREN} children — the images worth stopping on, not one per image.
+
+Each must say what its image actually SHOWS and what it is being used to argue. The point is the part of the post that the text does not carry: a chart's axes and what it actually plots, what a screenshot is of, who is in a photo and what they are doing, what a meme's joke is at the expense of.
+
+Do not restate the caption back to me — if the image adds nothing the post already says, it is not worth a card.
+${covered.length ? `\nALREADY ON THE BOARD — do not restate any of these:\n${covered.slice(0, 40).map((t) => `- ${t}`).join("\n")}\n` : ""}
+media_ref must name the image you read. Never describe an image you were not shown, and never attribute one image's content to another's ref.`,
+  });
+
+  const res = await grok().responses.create({
+    model: GROK_MODEL,
+    reasoning_effort: REASONING_EFFORT,
+    input: [
+      {
+        role: "system",
+        content: `You read images attached to real X posts and report what they depict or assert.
+
+Absolute rules:
+- Only ever describe an image you were actually shown. Never infer an image's contents from its caption.
+- If an image is illegible, low-resolution or ambiguous, say so plainly rather than guessing.
+${SHARED_RULES}`,
+      },
+      { role: "user", content },
+    ],
+    text: {
+      format: { type: "json_schema", name: "media_children", strict: true, schema },
+    },
+  } as unknown as Parameters<OpenAI["responses"]["create"]>[0]);
+
+  const text = outputTextOf(res);
+  if (!text) throw new Error("vision returned no content");
+
+  const parsed = extractJson<{ children: VisionChild[] }>(text, (o) =>
+    Array.isArray((o as { children?: unknown })?.children),
+  );
+  return (parsed.children ?? []).slice(0, MAX_CHILDREN);
+}
+
+/**
+ * The SDK synthesises output_text, but the raw Responses payload only carries
+ * output[].content[].text — confirmed by probing both. Read either, so this
+ * doesn't turn into a silent empty string if the SDK shape shifts.
+ */
+function outputTextOf(res: unknown): string {
+  const r = res as {
+    output_text?: string;
+    output?: { type?: string; content?: { type?: string; text?: string }[] }[];
+  };
+  if (r.output_text) return r.output_text;
+  return (r.output ?? [])
+    .flatMap((o) => o.content ?? [])
+    .filter((c) => c.type === "output_text")
+    .map((c) => c.text ?? "")
+    .join("");
+}

@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
-import { buildBoard, buildBoardFromTrends, coveredGround } from "@/lib/boardBuilder";
+import {
+  buildBoard,
+  buildBoardFromTrends,
+  coveredGround,
+  optionsToNodes,
+} from "@/lib/boardBuilder";
 import { clusterSeed, hasGrok, MAX_ROOTS } from "@/lib/grokClient";
+import { expandOptions, optionCorpus } from "@/lib/optionsExpander";
+import { hasExa } from "@/lib/exaClient";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
 import { getHomeTimeline, getPersonalizedTrends } from "@/lib/xClient";
@@ -24,6 +31,64 @@ export async function POST(req: Request) {
 
   const board = getBoard();
   if (!board) return NextResponse.json({ error: "no board" }, { status: 409 });
+
+  /**
+   * More of the same question.
+   *
+   * Three roots is what's legible on open, not what exists — and that's as true
+   * of a decision as of a day. Here it means more directions on the question you
+   * asked, along the axis already established, rather than more of anything from
+   * X. The novelty rule does the work: every title and every source already on
+   * the board is withheld, so this can only come back with directions you have
+   * not been offered.
+   */
+  if (board.kind === "options") {
+    if (!hasGrok() || !hasExa()) {
+      return NextResponse.json({ error: "Grok and Exa required" }, { status: 503 });
+    }
+    try {
+      const seen = coveredGround(board);
+      const question = board.seed.label;
+      const { web, query } = await optionCorpus(question, [], seen.urls);
+      if (!web.length) {
+        return NextResponse.json({ roots: [], posts: {}, exhausted: true });
+      }
+      const { options } = await expandOptions(
+        { title: question },
+        [],
+        seen.titles,
+        web,
+        // the existing ROOTS specifically — extending the top-level division is
+        // a different job from avoiding every title anywhere on the board
+        board.root_ids.map((id) => board.nodes[id]?.title).filter(Boolean),
+      );
+      if (!options.length) {
+        return NextResponse.json({ roots: [], posts: {}, exhausted: true });
+      }
+
+      // roots sit at depth 0 / generality 1, like every other root on the board
+      const anchor = board.nodes[board.root_ids[0]];
+      const fresh = optionsToNodes(
+        { ...anchor, id: "__more", generality: 1.15, depth: -1 },
+        options,
+        web,
+      ).map((n) => ({ ...n, parent_id: null, depth: 0, generality: 1, axis: undefined }));
+
+      patchBoard((b) => ({
+        ...b,
+        nodes: { ...b.nodes, ...Object.fromEntries(fresh.map((n) => [n.id, n])) },
+        root_ids: [...b.root_ids, ...fresh.map((n) => n.id)],
+      }));
+      console.log("[roots/more/options] %s -> %d more", query, fresh.length);
+      return NextResponse.json({ roots: fresh, posts: {} });
+    } catch (err) {
+      console.error("[roots/more/options]", err);
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "failed" },
+        { status: 500 },
+      );
+    }
+  }
 
   const token = await activeToken();
   if (!token?.user_id) {

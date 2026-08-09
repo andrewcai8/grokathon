@@ -4,7 +4,9 @@ import { memo, useEffect, useRef } from "react";
 import type { PositionedCard } from "@/lib/layout";
 import type { Board, Fork, XPost } from "@/lib/schema";
 import { isContestable } from "@/lib/evidence";
+import { cardMedia, readMediaUrls } from "@/lib/media";
 import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight } from "@/lib/store";
+import { CardMedia } from "./CardMedia";
 import { OptionImage } from "./OptionImage";
 import { PostChip } from "./PostChip";
 import { SourceChip } from "./SourceChip";
@@ -50,6 +52,12 @@ function distinctAccounts(posts: XPost[]) {
 
 /** Enough to read corroboration at a glance; past this it's just wallpaper. */
 const SOURCE_CAP = 6;
+/**
+ * Web sources share the citation row with the post chips, and a card carrying
+ * five accounts AND six outlets is a card that's mostly footer. Three outlets
+ * already says "this was reported, not just posted", which is the whole job.
+ */
+const WEB_CAP = 3;
 
 interface Props {
   card: PositionedCard;
@@ -99,6 +107,29 @@ function BranchCardInner({
    */
   const isOption = !isContestable(board.kind);
   const webSources = n.source_urls_meta ?? [];
+  /**
+   * The pictures behind this card. We have been fetching these on every X call
+   * and throwing them away — a quarter of a real timeline carries media, so
+   * that was a quarter of what was said going unrendered.
+   */
+  const media = isOption ? [] : cardMedia(board, n);
+  /** a media node IS its picture; every other card merely has one */
+  const mediaLeads = n.type === "media";
+
+  /**
+   * "Read image" only appears where there is an UNREAD image.
+   *
+   * Not merely where there's an image: the server strips anything vision has
+   * already read anywhere on the board, so a card whose only picture was read
+   * from a sibling branch would offer a button that comes back 422 every time.
+   * A button that reliably errors is worse than no button. Never on a media
+   * node either — that would re-read the frame it was written from.
+   */
+  const unread = media.some((m) => !readMediaUrls(board).has(m.url));
+  const forks =
+    unread && !mediaLeads
+      ? [{ fork: "media" as Fork, label: "Read image" }, ...QUICK_FORKS]
+      : QUICK_FORKS;
 
   // measure the content, not the card — the card's own height comes FROM this
   useEffect(() => {
@@ -163,6 +194,15 @@ function BranchCardInner({
           <OptionImage nodeId={n.id} prompt={n.media?.alt} url={n.media?.url} />
         ) : null}
 
+        {/* A vision node's whole subject is one frame, so the frame is the
+            card — same reasoning as an option's picture, one row up from the
+            title it explains. */}
+        {mediaLeads && media.length ? (
+          <div className="mb-3 [&>div]:mt-0">
+            <CardMedia items={media} fit={mediaLeads ? "contain" : "cover"} />
+          </div>
+        ) : null}
+
         <h3
           className="gb-title text-[17px] leading-[1.3] tracking-[-0.014em]"
           style={{
@@ -187,6 +227,11 @@ function BranchCardInner({
             {n.body}
           </p>
         ) : null}
+
+        {/* Below the body, because on a claim card the picture is evidence for
+            what was just said. On a media node it's the other way round and the
+            frame leads — see above the title. */}
+        {!mediaLeads && media.length ? <CardMedia items={media} fit={mediaLeads ? "contain" : "cover"} /> : null}
 
         {/* The dimension the children divide this along. Naming it is what
             forces three different directions instead of three samples of one,
@@ -279,13 +324,40 @@ function BranchCardInner({
                   {sources.length} {sources.length === 1 ? "account" : "accounts"}
                 </span>
               ) : null}
+              {/* Reporting counts toward corroboration too. "Widely shared"
+                  across two accounts and three outlets is a different claim
+                  from the same status across two accounts, and the whole point
+                  of retrieving the web alongside X was that for a factual claim
+                  the reporting is usually the better evidence. */}
+              {webSources.length ? (
+                <span style={{ color: "var(--gb-faint)" }}>
+                  {"  ·  "}
+                  {webSources.length}{" "}
+                  {webSources.length === 1 ? "article" : "articles"}
+                </span>
+              ) : null}
             </div>
           ) : null}
 
-          {!isOption && shown.length ? (
+          {!isOption && (shown.length || webSources.length) ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {shown.map((s) => (
                 <PostChip key={s.post.id} post={s.post} count={s.count} />
+              ))}
+              {/* The web sources a news card was actually built from. We
+                  retrieve these, hand them to Grok and record them on the node
+                  — and until now rendered them only on options boards, so a
+                  claim grounded in three articles displayed as if it were
+                  grounded in nothing. Everything on a card is grounded in
+                  something real we retrieved; that has to be visible or it
+                  isn't a claim the board is making. */}
+              {webSources.slice(0, WEB_CAP).map((w) => (
+                <SourceChip
+                  key={w.url}
+                  url={w.url}
+                  title={w.title}
+                  siteName={w.siteName}
+                />
               ))}
               {sources.length > shown.length ? (
                 <span
@@ -327,7 +399,7 @@ function BranchCardInner({
             board simply doesn't offer them rather than offering dead buttons. */}
         {selected && !pending && !isOption ? (
           <div className="gb-attribution mt-3 flex flex-wrap gap-1.5">
-            {QUICK_FORKS.map((f) => (
+            {forks.map((f) => (
               <button
                 key={f.fork}
                 onClick={(e) => {

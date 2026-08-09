@@ -123,6 +123,23 @@ body {
   transition: opacity 90ms linear;
 }
 
+/* Post media rides the SAME ramp as body text, because it is body text — it's
+   the part of the post the words don't carry.
+
+   Two channels, not one. Opacity sinks it into the card so the zoomed-out board
+   stays a map of headlines rather than a mood board. Saturation is the more
+   important of the two: this surface's one colour rule is that saturated pixels
+   mean "contested" or "flagged", and a full-colour photograph at overview scale
+   would shout down every epistemic badge on screen. Desaturated, it reads as
+   texture — which at that zoom is exactly what it is. */
+.gb-media {
+  opacity: calc(0.24 + 0.76 * var(--body-reveal));
+  filter: saturate(calc(0.12 + 0.88 * var(--body-reveal)));
+  transition:
+    opacity 90ms linear,
+    filter 90ms linear;
+}
+
 .gb-ghost {
   opacity: var(--ghost-opacity);
   animation: gb-ghost-in 160ms cubic-bezier(0.22, 1, 0.36, 1);

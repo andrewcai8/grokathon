@@ -33,6 +33,10 @@ export const XPostSchema = z.object({
         kind: z.enum(["photo", "video", "animated_gif"]),
         url: z.string(),
         alt: z.string().optional(),
+        /** intrinsic pixels — the card sizes its frame from these, see lib/media */
+        width: z.number().optional(),
+        height: z.number().optional(),
+        duration_ms: z.number().optional(),
       }),
     )
     .optional(),
@@ -146,6 +150,15 @@ export const BranchNodeSchema = z.object({
       url: z.string().optional(),
       alt: z.string().optional(),
       vision_summary: z.string().optional(),
+      /**
+       * The post this image was attached to. A vision claim is a claim about
+       * something a real account published, so it has to say which one —
+       * otherwise it's an assertion about a picture nobody can go and check.
+       */
+      post_id: z.string().optional(),
+      /** carried so a snapshotted vision card reframes identically on replay */
+      width: z.number().optional(),
+      height: z.number().optional(),
     })
     .optional(),
 

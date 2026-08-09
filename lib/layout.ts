@@ -1,3 +1,4 @@
+import { cardMedia, frameAspect } from "./media";
 import type { Board, BranchNode } from "./schema";
 
 /**
@@ -10,7 +11,10 @@ import type { Board, BranchNode } from "./schema";
  * There is no separate "priority plane" view. Zooming out IS that view.
  */
 
-export const CARD_W = 300;
+export const CARD_W = 540;
+/** px-4 on .gb-card, both sides — the only thing between CARD_W and text width */
+const CARD_PAD = 16;
+const INNER_W = CARD_W - CARD_PAD * 2;
 export const COL_GAP = 44;
 export const CARD_GAP = 26;
 export const TOP_PAD = 88;
@@ -84,23 +88,46 @@ const SKELETON_SHAPES = [
  * stable layout that doesn't reflow mid-transition, and a card that changes
  * height while you're flying toward it reads as a bug.
  */
-export function estimateCardHeight(node: BranchNode): number {
-  const titleLines = Math.max(1, Math.ceil(node.title.length / 26));
-  const bodyLines = node.body ? Math.max(1, Math.ceil(node.body.length / 46)) : 0;
+export function estimateCardHeight(
+  node: BranchNode,
+  /** aspect ratio of the media frame this card will draw, if any */
+  mediaAspect?: number,
+): number {
+  // Chars per line comes from the measured average glyph width at each size
+  // (17px title, 13px body), so the estimate follows CARD_W instead of being
+  // silently wrong the next time the column gets wider.
+  const titlePerLine = INNER_W / 10.3;
+  const bodyPerLine = INNER_W / 5.83;
+  const titleLines = Math.max(1, Math.ceil(node.title.length / titlePerLine));
+  const bodyLines = node.body ? Math.max(1, Math.ceil(node.body.length / bodyPerLine)) : 0;
   const titleH = titleLines * 25;
   const bodyH = bodyLines * 21;
-  // Citations wrap, roughly two per row at CARD_W — reserve every row, or the
-  // first paint of a heavily-sourced card jumps when the real height lands.
+  // Citations wrap — reserve every row, or the first paint of a heavily-sourced
+  // card jumps when the real height lands. A chip is ~130px with its gap, so how
+  // many fit is a function of CARD_W, not the 2 it happened to be at 300px.
   // Upper bound only: the card dedupes to one chip per account and caps at 6,
   // so this over-reserves for repeat posters and the measurement corrects it.
-  const chipRows = Math.ceil(Math.min(6, node.source_post_ids.length) / 2);
+  const chipsPerRow = Math.max(1, Math.floor(INNER_W / 130));
+  const chipRows = Math.ceil(Math.min(6, node.source_post_ids.length) / chipsPerRow);
   const chipsH = chipRows ? chipRows * 24 + (chipRows - 1) * 6 + 8 : 0;
   const badgeH = node.epistemic ? 22 : 0;
-  return 20 + titleH + (bodyH ? bodyH + 10 : 0) + chipsH + badgeH + 20;
+  // The media frame at the card's inner width, plus its top margin. Exact
+  // rather than approximate, because it can be: the aspect ratio comes from
+  // the X API, so CardMedia's box never depends on the bytes arriving.
+  const mediaH = mediaAspect ? Math.round(INNER_W / mediaAspect) + 12 : 0;
+  return 20 + titleH + (bodyH ? bodyH + 10 : 0) + mediaH + chipsH + badgeH + 20;
 }
 
-function byPriority(a: BranchNode, b: BranchNode) {
-  return b.priority - a.priority;
+/**
+ * The shape of the frame this card will actually draw, or undefined for none.
+ *
+ * Asking cardMedia rather than re-deriving it is the only way the estimate and
+ * the measurement can't disagree — and a disagreement here is a 200px hole
+ * punched into a column that has already animated in.
+ */
+function mediaAspectOf(board: Board, node: BranchNode): number | undefined {
+  const hero = cardMedia(board, node)[0];
+  return hero ? frameAspect(hero) : undefined;
 }
 
 /**
@@ -128,11 +155,12 @@ export function computeLayout(
   const tracks: TrackBox[] = [];
   const byId: Record<string, PositionedCard> = {};
 
+  // children_ids order is authoritative, for the same reason root_ids is (see
+  // below): a fork ADDS a branch to a node that may already be open, and
+  // re-sorting the whole column by priority let a fresh counter land above
+  // children you had already read. Each batch is ordered when it's merged.
   const kidsOf = (node: BranchNode) =>
-    node.children_ids
-      .map((id) => board.nodes[id])
-      .filter(Boolean)
-      .sort(byPriority);
+    node.children_ids.map((id) => board.nodes[id]).filter(Boolean);
 
   /**
    * Places `node` with its top at `top`. Returns the band height it consumed
@@ -144,7 +172,11 @@ export function computeLayout(
     depth: number,
     top: number,
   ): { band: number; right: number } => {
-    const own = heights[node.id] ?? estimateCardHeight(node);
+    // Reserve the picture's space in the ESTIMATE too. The measurement lands a
+    // frame later and would otherwise drop a 150px hole into a column that had
+    // already animated in — the one way media could still thrash the bands.
+    const own =
+      heights[node.id] ?? estimateCardHeight(node, mediaAspectOf(board, node));
     const isPending = pending.has(node.id);
     const isOpen = expanded.has(node.id) || isPending;
     const x = LEFT_PAD + depth * (CARD_W + COL_GAP);
@@ -219,10 +251,14 @@ export function computeLayout(
   };
 
   let cursor = TOP_PAD;
-  for (const root of board.root_ids
-    .map((id) => board.nodes[id])
-    .filter(Boolean)
-    .sort(byPriority)) {
+  // root_ids order is authoritative — the list is APPENDED to, by "more of your
+  // day". Re-sorting by priority here scored each batch against the whole
+  // column, so a fresh root with a high score landed in the middle of roots you
+  // had already read and shoved everything below it down. Order is decided once,
+  // when a root enters the board (buildBoard/buildBoardFromTrends sort their own
+  // batch); after that the column only ever grows downward. It's also what makes
+  // "trends first, then your timeline" in /api/seed actually hold.
+  for (const root of board.root_ids.map((id) => board.nodes[id]).filter(Boolean)) {
     cursor += place(root, 0, cursor).band + CARD_GAP;
   }
 

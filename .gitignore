@@ -49,3 +49,7 @@ next-env.d.ts
 # generated option-card images, cached by prompt hash ($0.05 each, so kept
 # across restarts — but they're reproducible, not source)
 /public/gb-images/
+
+# throwaway Playwright drivers used to exercise the running app
+.drive*.mjs
+.diag*.mjs

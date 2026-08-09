@@ -51,11 +51,31 @@ export async function loadSnapshot(name = "latest"): Promise<Board | null> {
  *
  * Never overwrites a real capture with fixtures: synthetic data must not be
  * able to masquerade as posts we actually fetched.
+ *
+ * Nor with a board of another KIND. "latest" is the rehearsed demo — your day
+ * on X — and an options board warming itself wrote a car board straight over
+ * it, so the app then opened on "help me pick a laptop" as if that were your
+ * morning. Each kind warms its own slot, and a mismatch is refused outright
+ * rather than resolved, because the cost of guessing wrong is losing the one
+ * artefact the demo cannot be run without.
  */
+function slotFor(board: Board) {
+  return board.seed.name ?? (board.kind === "options" ? "options-latest" : "latest");
+}
+
 export async function persistWarmedBoard(board: Board | null): Promise<void> {
   if (!board?.root_ids?.length || board.seed.fixture) return;
+  const name = slotFor(board);
   try {
-    await saveSnapshot(board, board.seed.name ?? "latest");
+    const existing = await loadSnapshot(name);
+    if (existing && (existing.kind ?? "news") !== (board.kind ?? "news")) {
+      console.warn(
+        "[snapshot] refusing to overwrite %s (%s) with a %s board",
+        name, existing.kind ?? "news", board.kind ?? "news",
+      );
+      return;
+    }
+    await saveSnapshot(board, name);
   } catch (err) {
     // warming is a convenience; never let it take down an expand that worked
     console.error("[snapshot] persist failed:", err);

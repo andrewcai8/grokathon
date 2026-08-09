@@ -35,6 +35,14 @@ export async function GET(req: Request) {
       setBoard(snap);
       return NextResponse.json({ board: snap, source: "snapshot" });
     }
+    // Asking for a NAMED snapshot is asking for that board, not for whatever
+    // else is on disk. Falling through handed back "your day on X" when the
+    // caller asked for the last decision board — a different board answering
+    // to the wrong name, which is worse than an empty-handed no.
+    return NextResponse.json(
+      { error: `no snapshot named "${wantSnapshot}"` },
+      { status: 404 },
+    );
   }
 
   // default to the rehearsed snapshot unless explicitly asked for a live read —

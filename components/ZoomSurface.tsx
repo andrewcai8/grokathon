@@ -12,7 +12,7 @@ import { AskComposer } from "./AskComposer";
 import { SkeletonCard } from "./SkeletonCard";
 import { MoreRootsCard } from "./MoreRootsCard";
 import { RootAskCard } from "./RootAskCard";
-import type { Board } from "@/lib/schema";
+import type { Board, BranchNode } from "@/lib/schema";
 
 /** Titles from root down to (not including) this node, for prompt context. */
 function ancestorsOf(board: Board | null, id: string): string[] {
@@ -292,8 +292,9 @@ export function ZoomSurface() {
       if (e.key === "@") {
         e.preventDefault();
         if (s.hoveredId && s.board?.nodes[s.hoveredId]) s.startAsk(s.hoveredId);
-        // ...and on a decision board there is no plot to put the cursor in, so
-        // the keystroke does nothing rather than focusing something unrendered
+        // ...and on a decision board there is no board-level plot to put the
+        // cursor in (see canAskBoard), so an empty hand does nothing rather
+        // than focusing something unrendered
         else if (s.board?.kind !== "options") s.focusRootAsk();
         return;
       }
@@ -331,8 +332,18 @@ export function ZoomSurface() {
       id: string,
       fork: string,
       append: boolean,
-      /** fork "ask" only — the user's question and the corpus to start from */
-      ask?: { question: string; corpus: string[]; covered: string[] },
+      /**
+       * fork "ask" only — the question, the corpus to start from, and the card
+       * it was asked of. The last one is what "this" points at, and on a
+       * decision board it also carries the attribute labels an answer has to be
+       * comparable against.
+       */
+      ask?: {
+        question: string;
+        corpus: string[];
+        covered: string[];
+        askParent?: BranchNode;
+      },
     ) => {
       const s = useBoard.getState();
       const startedAt = performance.now();
@@ -410,11 +421,17 @@ export function ZoomSurface() {
           // The answer's own citations land on the question card, so an ask
           // that returns no cards is still visibly grounded. Must run AFTER
           // mergeChildren, which rebuilds this node from its children.
-          if (data.source === "x_agent") {
+          // "x_agent" on a news board, "web_agent" on a decision board — the
+          // same answer landing on the same question card, differing only in
+          // what it is allowed to cite
+          if (data.source === "x_agent" || data.source === "web_agent") {
             useBoard.getState().applyAnswer(id, {
               postIds: data.answerPostIds,
               web: data.answerWeb,
               grounded: data.grounded,
+              // only ever set on a decision board, and only when Grok decided
+              // the answer wanted a picture
+              imagePrompt: data.answerImagePrompt,
             });
           }
           useBoard.getState().expand(id);
@@ -522,6 +539,10 @@ export function ZoomSurface() {
       requestExpand(q.id, "ask", false, {
         question,
         corpus: parent?.source_post_ids ?? [],
+        // the card they typed at, not just its title: its body is what makes
+        // "this" resolvable, and its attribute labels are what an answer on a
+        // decision board has to line up with
+        askParent: parent ?? undefined,
         // what's already up there, so the answer isn't something the user has
         // read — the same novelty rule "more of your day" sends, and the reason
         // a board ask can't hand back a topic that's already a root
@@ -543,18 +564,16 @@ export function ZoomSurface() {
   const showGhost = Boolean(hoveredCard) && hoveredCard?.node.id !== askingId;
 
   /**
-   * Asking the board is a NEWS move, and there is no plot for it on a decision.
+   * Asking a CARD works on both boards now. Asking the BOARD is still news-only.
    *
-   * A decision board's roots are options on one question — they carry
-   * attributes, share an axis, and are compared against each other. A topic
-   * spawned by the news agent would land in that column as a card with an
-   * epistemic badge and post citations, next to three options being scored on
-   * price and range: the exact category error /api/expand already refuses an
-   * ask with (422, "asking isn't supported on a decision board yet").
-   *
-   * So the affordance goes away rather than being offered and then refused.
-   * Wanting more of a decision is what "more directions" is for, and it's
-   * right underneath.
+   * Not a category error any longer — the agent answers in options when the
+   * board is one (see askAgent's `kind`), which is what the per-card composer
+   * on a decision board now does. It's that the root column of a decision board
+   * is already an answer to one question: three options on a named axis,
+   * compared against each other. A question typed at the foot of it either asks
+   * for more of them, which is the button directly underneath, or asks for
+   * something off that axis, which lands beside three cards it can't be read
+   * against. Neither one wants a second plot.
    */
   const canAskBoard = board?.kind !== "options";
 

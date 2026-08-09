@@ -5,7 +5,7 @@ import type { PositionedCard } from "@/lib/layout";
 import type { Board, Fork, XPost } from "@/lib/schema";
 import { isContestable, isGrounded } from "@/lib/evidence";
 import { cardMedia, readMediaUrls } from "@/lib/media";
-import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight } from "@/lib/store";
+import { EPISTEMIC_LABEL, FORK_LABEL, reportHeight, useBoard } from "@/lib/store";
 import { postedAt, stamp } from "@/lib/time";
 import { CardMedia } from "./CardMedia";
 import { OptionImage } from "./OptionImage";
@@ -426,11 +426,17 @@ function BranchCardInner({
                   />
                 ))}
               </div>
-            ) : (
+            ) : isQuestion ? null : (
               /* An option with no sources is the more dangerous unsourced card,
                  not the less: a price and a range read as facts about a real
                  product, and nobody hovers a spec sheet to check where it came
-                 from. Same marker, same reason. */
+                 from. Same marker, same reason.
+
+                 A question is the exception here as it is everywhere else: it
+                 asserts nothing, so there is nothing for it to be unsourced
+                 ABOUT. "What's the Toyota equivalent" carries the marker only
+                 once Grok's answer lands on it — and then it carries the
+                 answer's own sources, so it doesn't. */
               <div
                 className="gb-label"
                 style={{ color: "var(--gb-warn)", fontSize: "10.5px" }}
@@ -520,7 +526,13 @@ function BranchCardInner({
                 than a fork does because it may search several times. Saying
                 which is happening is the difference between waiting and
                 wondering whether it broke. */}
-            {isQuestion ? "Grok searching X and the web" : "Grok expanding"}
+            {isQuestion
+              ? isOption
+                ? // no X on a decision board: a post chip has nowhere to go on
+                  // a card made of attributes, so the answer is web-grounded
+                  "Grok searching the web"
+                : "Grok searching X and the web"
+              : "Grok expanding"}
           </div>
         ) : null}
 
@@ -531,6 +543,30 @@ function BranchCardInner({
           >
             <span>!</span>
             <span>{error} — click to retry</span>
+          </div>
+        ) : null}
+
+        {/* A decision card offers no forks, so until now it offered nothing at
+            all: asking was reachable only by hovering and pressing @, which is
+            a feature nobody finds. The one action that does mean something
+            about a choice is asking about it — "what's the Toyota equivalent to
+            this" — so that is the button, in the space the forks would take. */}
+        {selected && !pending && isOption && !isQuestion ? (
+          <div className="gb-attribution mt-3 flex flex-wrap gap-1.5">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                useBoard.getState().startAsk(n.id);
+              }}
+              className="gb-label border px-2 py-[5px] transition-colors"
+              style={{
+                borderColor: "var(--gb-live)",
+                color: "var(--gb-live)",
+                borderRadius: 2,
+              }}
+            >
+              Ask @grok
+            </button>
           </div>
         ) : null}
 

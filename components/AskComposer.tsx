@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { PositionedCard } from "@/lib/layout";
 import { ghostSlot } from "@/lib/layout";
+import { isContestable } from "@/lib/evidence";
+import { useBoard } from "@/lib/store";
 
 /**
  * Asking, in the slot the answer will land in.
@@ -28,6 +30,14 @@ export function AskComposer({
   const slot = ghostSlot(card);
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
+  /**
+   * What Grok is about to go and read, said before they commit to waiting.
+   *
+   * A decision board has no X in it — its answers are products and prices,
+   * which live on the web — so promising a search of X here would be promising
+   * evidence that cannot appear on the card that comes back.
+   */
+  const decide = !isContestable(useBoard((s) => s.board?.kind));
 
   useEffect(() => {
     // focus after the transform lands, or the browser scrolls the canvas to
@@ -112,7 +122,7 @@ export function AskComposer({
           >
             Ask ⏎
           </button>
-          <span>Grok will search X and the web</span>
+          <span>{decide ? "Grok will search the web" : "Grok will search X and the web"}</span>
         </div>
       </div>
     </div>

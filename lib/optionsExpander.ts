@@ -39,19 +39,57 @@ export interface OptionChild {
   has_children: boolean;
 }
 
-const OPTIONS_SYSTEM = `You help a person narrow a decision down to one choice, three options at a time.
+/**
+ * What an option IS, and what makes one decidable.
+ *
+ * Split out from the division rules below because the ask agent (askAgent, in
+ * decide mode) writes option cards too, and it is not dividing anything — it is
+ * answering "what's the Toyota equivalent to this" with one card. Handing it
+ * "the three options must be different directions" told it to invent two more
+ * options nobody asked for. These rules are the ones that apply to any card on
+ * a decision board; the ones below apply only when a space is being split.
+ */
+const OPTION_CARD_RULES = `- An option is a CHOICE, not a claim. It is not true or false. Do not hedge, do not weigh evidence, do not label anything contested. Say what the thing is and what it costs you.`;
 
-Absolute rules:
-- The web pages you are given are the ONLY ground truth. Every option must be something those pages actually describe, and every attribute value must come from them. Never invent a product, a price or a spec that is not in the sources.
-- An option is a CHOICE, not a claim. It is not true or false. Do not hedge, do not weigh evidence, do not label anything contested. Say what the thing is and what it costs you.
-- The three options must be genuinely DIFFERENT DIRECTIONS, not variations of one thing. If two of them would suit the same person for the same reason, replace one. Divide the space; do not sample it.
-- All three must be points on the SAME named axis — mutually exclusive, and together covering the space. Three options taken from three different dimensions (a size, then a body style, then a fuel type) is a grab bag, not a division: the person can no longer tell which question they are answering, and the options overlap so picking one doesn't rule the others out. Where the space has a simple ordered axis — small / medium / large, cheap / mid / premium, short / medium / long — prefer it: it is instantly legible and obviously complete.
-- Every option must be strictly one level more specific than the parent, and must be a real choice a person could actually make.
-- Attributes are what make a choice decidable: the 2-4 facts a person would genuinely compare. Their labels must be IDENTICAL across all three options, in the same order, so the three can be read down a column against each other. A fact only one option has is not a comparison — leave it out.
+const OPTION_ATTRIBUTE_RULES = `- Attributes are what make a choice decidable: the 2-4 facts a person would genuinely compare. Their labels must be IDENTICAL across all three options, in the same order, so the three can be read down a column against each other. A fact only one option has is not a comparison — leave it out.
 - Every attribute must DISCRIMINATE. If a value would read the same on all three cards it is telling the reader nothing: drop it and find one that differs. Never restate the constraint they already gave — "under $30,000" on a card inside a $30,000 search is a wasted row.
 - Prefer concrete measured facts with units — price, range, mpg, weight, capacity, duration — over editorial verdicts like "editor's choice" or "also recommended". A ranking is someone's opinion of an option; a number is a property of it.
 - Never write "Not listed", "N/A", "Unknown" or a dash as a value. If the sources don't give you the fact, omit that attribute for that option entirely. A missing row is fine; a row full of nothing makes the card look broken.
 - Titles must be legible alone at a glance.`;
+
+/** Only for the expander: turning one category into N points on one axis. */
+const OPTION_DIVISION_RULES = `- The three options must be genuinely DIFFERENT DIRECTIONS, not variations of one thing. If two of them would suit the same person for the same reason, replace one. Divide the space; do not sample it.
+- All three must be points on the SAME named axis — mutually exclusive, and together covering the space. Three options taken from three different dimensions (a size, then a body style, then a fuel type) is a grab bag, not a division: the person can no longer tell which question they are answering, and the options overlap so picking one doesn't rule the others out. Where the space has a simple ordered axis — small / medium / large, cheap / mid / premium, short / medium / long — prefer it: it is instantly legible and obviously complete.
+- Every option must be strictly one level more specific than the parent, and must be a real choice a person could actually make.`;
+
+/**
+ * One prompt, two groundings — the same lesson systemFor learned.
+ *
+ * The expander is HANDED its corpus, so "the pages you are given" is the truth.
+ * The ask agent goes and gets its own, so the same sentence would tell it to
+ * disregard the search tool it was just handed — which is exactly how the
+ * corpus wording once leaked into the x_search path and produced "no dissent
+ * found in corpus" without a single search.
+ */
+const OPTION_GROUNDING: Record<"corpus" | "search", string> = {
+  corpus: `- The web pages you are given are the ONLY ground truth. Every option must be something those pages actually describe, and every attribute value must come from them. Never invent a product, a price or a spec that is not in the sources.`,
+  search: `- The web pages YOUR TOOLS RETURN are the only ground truth. Every option must be something those pages actually describe, and every attribute value must come from them. Never invent a product, a price or a spec that is not in a page you retrieved, and never cite a ref you were not given.`,
+};
+
+export function optionsSystemFor(
+  grounding: "corpus" | "search",
+  /** false when writing a single card rather than splitting a space */
+  dividing = true,
+) {
+  return `You help a person narrow a decision down to one choice, three options at a time.
+
+Absolute rules:
+${OPTION_GROUNDING[grounding]}
+${OPTION_CARD_RULES}
+${dividing ? `${OPTION_DIVISION_RULES}\n` : ""}${OPTION_ATTRIBUTE_RULES}`;
+}
+
+const OPTIONS_SYSTEM = optionsSystemFor("corpus");
 
 /**
  * Turn a node into a web query that finds comparisons.

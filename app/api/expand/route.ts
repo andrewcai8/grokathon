@@ -206,6 +206,23 @@ async function groundNode(
 }
 
 /**
+ * The decision this board is narrowing, as stated by whoever knows it.
+ *
+ * The board's own seed label is the question ("help me pick a car under $30k"),
+ * but the server keeps one board per kind and the client is routinely holding a
+ * different one — so the client sends it too, for the same reason it sends the
+ * node and the kind. Both the options expand and an ask on an options board
+ * need it and must not disagree about which one wins.
+ */
+function decisionQuestion(board: Board, fromClient?: string): string | undefined {
+  return (
+    board.kind === "options" && board.seed.label !== "client"
+      ? board.seed.label
+      : fromClient
+  )?.trim();
+}
+
+/**
  * The expand contract (doc §3.4): structured children, never a chat dump.
  * Capped, cited, honestly labelled.
  */
@@ -253,6 +270,17 @@ export async function POST(req: Request) {
      * is the only side guaranteed to know which card that was.
      */
     corpus?: string[];
+    /**
+     * fork "ask" only: the CARD the question was asked from.
+     *
+     * `node` is the question itself — minted client-side, its title the user's
+     * words — so it can't answer "what does 'this' mean". The lineage carries
+     * that card's title but nothing else, and on a decision board the parts that
+     * are missing are the parts that matter: its body, and the attribute labels
+     * an equivalent has to be comparable against. The client is the only side
+     * guaranteed to hold it, exactly as with `node` and `kind`.
+     */
+    askParent?: BranchNode;
     /**
      * fork "ask" only: titles the client's board is already showing.
      *
@@ -347,22 +375,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "XAI_API_KEY not set" }, { status: 503 });
     }
     /**
-     * Ask is a CLAIM-shaped fork, so it belongs to claim-shaped boards.
+     * Ask now answers in whichever currency the board is denominated in.
      *
-     * It runs before the kind check because a question node is minted by the
-     * client and needs handling before anything reads the board — but that
-     * ordering meant asking a question on a decision board answered with claim
-     * cards carrying epistemic badges and X post citations. Options aren't true
-     * or false, so that is the one category error the evidence split exists to
-     * prevent, and it was the only cross-kind leak anywhere in the API.
+     * This used to refuse outright on a decision board (422, "asking isn't
+     * supported on a decision board yet"), because an ask returned claim cards
+     * — epistemic badges and X post citations — and landing one of those beside
+     * three cars being compared on price and range is the exact category error
+     * the evidence split exists to prevent.
      *
-     * Refused rather than silently answered in the wrong currency. Delete this
-     * the moment ask learns to answer in attributes.
+     * The refusal was the right call while the agent only spoke one language.
+     * It now takes `kind` and answers in options: web sources instead of posts,
+     * attributes instead of an epistemic status, and a generated picture,
+     * because on a decision board seeing the thing IS the card. Everything
+     * below this line is shared — one agent, one loop, one budget.
      */
-    if (kind === "options") {
+    if (kind === "options" && !hasExa()) {
       return NextResponse.json(
-        { error: "asking isn't supported on a decision board yet" },
-        { status: 422 },
+        {
+          error:
+            "EXA_API_KEY not set — a decision board's answers are grounded in the web",
+        },
+        { status: 503 },
       );
     }
     const question = (body.question ?? node.title).trim();
@@ -393,10 +426,34 @@ export async function POST(req: Request) {
        */
       const rooted = node.parent_id === null;
 
+      /**
+       * The card the question was asked FROM, not the question itself.
+       *
+       * `node` is the question — its title is the user's words — so passing it
+       * as the parent told the agent "the card you are looking at is the
+       * question you were asked", and the body of the card the pronoun actually
+       * points at was never in the prompt at all. The client sends the real one;
+       * the server's own graph is used when it happens to own the question.
+       */
+      const askedFrom = rooted
+        ? null
+        : (node.parent_id ? board.nodes[node.parent_id] : undefined) ??
+          body.askParent ??
+          node;
+
       const out = await askAgent({
         question,
-        parent: rooted ? null : node,
+        parent: askedFrom,
         ancestors,
+        kind,
+        // what the whole board is narrowing — an option's title never contains
+        // the subject, so without this "the Toyota equivalent to this" is a
+        // question about nothing in particular. Same fact, same source, as the
+        // options expand below.
+        boardQuestion: decisionQuestion(board, body.boardQuestion),
+        // the labels the asked-from card compares on, so an equivalent can be
+        // read against it row for row instead of bringing its own dimensions
+        compare: (askedFrom?.attributes ?? []).map((a) => a.label),
         /**
          * Union, for the same reason /api/roots/more takes one.
          *
@@ -416,6 +473,71 @@ export async function POST(req: Request) {
         date: board.date,
         xToken: tok?.access_token,
       });
+
+      /**
+       * A decision answer is built by the SAME code that builds an option.
+       *
+       * optionsToNodes resolves the web refs against the corpus and drops what
+       * doesn't resolve, dedupes sources by URL, strips placeholder attributes
+       * and hangs a pending image request off the card. Reimplementing any of
+       * that here is how the two paths would start to disagree about what an
+       * option is — and the answer card sits in the same column as ones the
+       * expander made, so any disagreement is visible on screen.
+       */
+      if (kind === "options") {
+        const before = out.options.length;
+        // no siblings passed: "reads the same on all three" is the wrong test
+        // for an equivalent, where an identical price is the answer rather than
+        // a wasted row
+        const children = optionsToNodes(node, out.options, out.web)
+          .map((c) => ({ ...c, fork: "ask" as const }))
+          /**
+           * An option card with no source is dropped, exactly as a claim is.
+           *
+           * It is the more dangerous uncited card, not the less: a price and a
+           * range read as facts about a real product and nobody hovers a spec
+           * sheet to check. The ANSWER still ships — a question with a straight
+           * reply and no card is a normal outcome here too.
+           */
+          .filter(isGrounded);
+        if (children.length < before) {
+          console.warn(
+            "[expand/ask] dropped %d/%d option cards with no surviving source",
+            before - children.length,
+            before,
+          );
+        }
+
+        console.log(
+          '[expand/ask:options] "%s" -> %d tool calls (%s) -> %d options%s',
+          question,
+          out.trace.length,
+          out.trace.map((t) => `${t.tool}:${t.got}`).join(" ") || "none",
+          children.length,
+          out.answerImagePrompt ? " + answer image" : "",
+        );
+
+        return NextResponse.json({
+          children,
+          posts: {},
+          fork: "ask",
+          summary: out.answer,
+          source: "web_agent",
+          trace: out.trace,
+          grounded: out.grounded,
+          // a decision board has no posts to cite; the reply's own sources are
+          // pages, and they render as chips under it the same way
+          answerPostIds: [],
+          answerWeb: out.answerWeb.map((w) => ({
+            url: w.url,
+            title: w.title,
+            siteName: w.siteName,
+          })),
+          // the model decided a picture was part of the answer — the question
+          // card asks for the bytes itself, as every option card does
+          answerImagePrompt: out.answerImagePrompt,
+        });
+      }
 
       // Only the posts actually cited reach the board. The agent's pool can
       // hold sixty posts after four searches and the other fifty-odd are
@@ -574,11 +696,7 @@ export async function POST(req: Request) {
        * client sends it for the same reason it sends the node and the kind:
        * the server's single board slot may be showing something else entirely.
        */
-      const question = (
-        board.kind === "options" && board.seed.label !== "client"
-          ? board.seed.label
-          : body.boardQuestion
-      )?.trim();
+      const question = decisionQuestion(board, body.boardQuestion);
       const ancestors =
         question && !lineage.includes(question) ? [question, ...lineage] : lineage;
 

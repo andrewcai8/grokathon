@@ -63,6 +63,7 @@ interface Props {
 
 /** Expand is not only "more detail" (doc §5.1). These are the beats worth demoing. */
 const QUICK_FORKS: { fork: Fork; label: string }[] = [
+  { fork: "replies", label: "Replies" },
   { fork: "counter", label: "Counters" },
   { fork: "primary_only", label: "Primary" },
   { fork: "falsifiers", label: "Falsify" },

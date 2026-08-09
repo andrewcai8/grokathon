@@ -226,6 +226,32 @@ export async function getPersonalizedTrends(token: string): Promise<XTrend[]> {
  * These ARE the board's root topics. X has already done the clustering, so we
  * use them directly rather than searching for posts and re-deriving topics.
  */
+/**
+ * The replies to a conversation, most-engaged first.
+ *
+ * Depth usually means "a narrower claim". This is a different KIND of
+ * information: what people said back. X exposes it through the
+ * `conversation_id:` search operator, so it needs no model at all — the
+ * replies are the content, already grounded, with nothing to hallucinate.
+ */
+export async function getReplies(
+  token: string,
+  conversationId: string,
+  limit = 40,
+): Promise<XPost[]> {
+  const json = await xGet<RawResponse>("/tweets/search/recent", token, {
+    query: `conversation_id:${conversationId} -is:retweet`,
+    max_results: String(Math.min(100, Math.max(10, limit))),
+    "tweet.fields": TWEET_FIELDS,
+    "user.fields": USER_FIELDS,
+    "media.fields": MEDIA_FIELDS,
+    expansions: EXPANSIONS,
+  });
+  return normalize(json)
+    .filter((p) => p.id !== conversationId)
+    .sort((a, b) => (b.metrics?.likes ?? 0) - (a.metrics?.likes ?? 0));
+}
+
 /** Fallback seed and topic reseed. Not an Owned Read — costs more per post. */
 export async function searchRecent(
   token: string,

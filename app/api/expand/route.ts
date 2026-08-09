@@ -3,6 +3,7 @@ import {
   expandNode,
   expandViaXSearch,
   hasGrok,
+  MAX_CHILDREN,
   searchQueryFor,
   XSEARCH_FORKS,
 } from "@/lib/grokClient";
@@ -16,7 +17,7 @@ import {
 } from "@/lib/boardBuilder";
 import { getBoard, patchBoard } from "@/lib/serverBoard";
 import { activeToken } from "@/lib/xAuth";
-import { getPostsByIds, searchRecent } from "@/lib/xClient";
+import { getPostsByIds, getReplies, searchRecent } from "@/lib/xClient";
 import {
   ForkSchema,
   type Board,
@@ -151,6 +152,84 @@ export async function POST(req: Request) {
       fork,
       cached: true,
     });
+  }
+
+  /**
+   * Replies need no model at all.
+   *
+   * Every other expansion asks Grok to say something about posts. This one
+   * returns the posts themselves — what people actually said back — so there
+   * is nothing to invent, nothing to verify, and no latency beyond one X call.
+   * It's also a different KIND of information than "a narrower claim", which
+   * is what makes going deeper feel like learning rather than rewording.
+   */
+  if (fork === "replies") {
+    const tok = await activeToken();
+    if (!tok?.access_token) {
+      return NextResponse.json({ error: "not connected to X" }, { status: 401 });
+    }
+    const covered = coveredGround(board, nodeId);
+    const seed = citedPosts(board, nodeId)[0];
+    const conversationId = seed?.conversation_id ?? seed?.id;
+    if (!conversationId) {
+      return NextResponse.json(
+        { error: "no post behind this card to read replies from" },
+        { status: 422 },
+      );
+    }
+    try {
+      const replies = (await getReplies(tok.access_token, conversationId))
+        .filter((p) => !covered.postIds.has(p.id))
+        .slice(0, MAX_CHILDREN);
+      if (!replies.length) {
+        return NextResponse.json(
+          { error: "no replies found for this post" },
+          { status: 404 },
+        );
+      }
+      const posts = Object.fromEntries(replies.map((p) => [p.id, p]));
+      const children = childrenToNodes(
+        node,
+        replies.map((p, i) => ({
+          type: "post" as const,
+          title: `@${p.author.handle}`,
+          body: p.text.slice(0, 280),
+          priority: 1 - i * 0.1,
+          generality: 0,
+          source_post_ids: [p.id],
+          has_children: true,
+          epistemic: "widely_shared" as const,
+        })),
+        posts,
+        fork,
+      );
+      patchBoard((b) =>
+        b.nodes[nodeId]
+          ? {
+              ...b,
+              nodes: {
+                ...b.nodes,
+                ...Object.fromEntries(children.map((c) => [c.id, c])),
+                [nodeId]: {
+                  ...b.nodes[nodeId],
+                  children_ids: [
+                    ...b.nodes[nodeId].children_ids,
+                    ...children.map((c) => c.id),
+                  ],
+                },
+              },
+              posts: { ...b.posts, ...posts },
+            }
+          : b,
+      );
+      return NextResponse.json({ children, posts, fork, source: "x_replies" });
+    } catch (err) {
+      console.error("[expand/replies]", err);
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "replies failed" },
+        { status: 500 },
+      );
+    }
   }
 
   if (!hasGrok()) {

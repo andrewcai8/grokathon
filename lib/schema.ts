@@ -74,6 +74,7 @@ export type EpistemicStatus = z.infer<typeof EpistemicStatusSchema>;
 /** Expand is not only "more detail" — see design doc §5.1 */
 export const FORKS = [
   "deeper",
+  "replies",
   "counter",
   "primary_only",
   "people",

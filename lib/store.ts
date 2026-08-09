@@ -255,6 +255,7 @@ export const EPISTEMIC_LABEL: Record<string, string> = {
 
 export const FORK_LABEL: Record<Fork, string> = {
   deeper: "Deeper",
+  replies: "Replies",
   counter: "Counters",
   primary_only: "Primary only",
   people: "People",

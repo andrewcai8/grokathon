@@ -242,6 +242,7 @@ ${posts.map(postLine).join("\n\n")}`;
 
 const FORK_INTENT: Record<Fork, string> = {
   deeper: "the most specific, load-bearing sub-claims of this",
+  replies: "what people said back to this — handled without a model, see getReplies",
   counter:
     "the strongest opposing frames, dissent and contradicting evidence — including from accounts a typical follower of this topic would never see",
   primary_only:

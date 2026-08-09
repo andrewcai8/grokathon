@@ -125,15 +125,6 @@ export function refresh(refreshToken: string) {
  */
 const TOKEN_FILE = path.join(process.cwd(), ".auth", "x-token.json");
 
-async function mirrorToDisk(token: XToken) {
-  try {
-    await mkdir(path.dirname(TOKEN_FILE), { recursive: true });
-    await writeFile(TOKEN_FILE, JSON.stringify(token, null, 2));
-  } catch (err) {
-    console.warn("[xAuth] could not mirror token to disk:", err);
-  }
-}
-
 async function readFromDisk(): Promise<XToken | null> {
   try {
     return JSON.parse(await readFile(TOKEN_FILE, "utf8")) as XToken;
@@ -141,6 +132,23 @@ async function readFromDisk(): Promise<XToken | null> {
     return null;
   }
 }
+
+async function mirrorToDisk(token: XToken) {
+  try {
+    // NEVER regress. X rotates refresh tokens — each refresh invalidates the
+    // previous one — and a browser cookie can lag behind a token refreshed
+    // server-side. Writing that stale cookie over a newer disk copy destroys
+    // the only valid refresh token, which is exactly what happened.
+    const existing = await readFromDisk();
+    if (existing && existing.expires_at >= token.expires_at) return;
+
+    await mkdir(path.dirname(TOKEN_FILE), { recursive: true });
+    await writeFile(TOKEN_FILE, JSON.stringify(token, null, 2));
+  } catch (err) {
+    console.warn("[xAuth] could not mirror token to disk:", err);
+  }
+}
+
 
 export async function storeToken(token: XToken) {
   await mirrorToDisk(token);

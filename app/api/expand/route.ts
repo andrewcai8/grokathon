@@ -624,6 +624,8 @@ export async function POST(req: Request) {
     let corpus = grounded ? relevantPosts(board, nodeId).filter(isNew) : [];
     let groundedNow = false;
     let web: WebSource[] = [];
+    /** set only when the web search THREW — never when it simply found nothing */
+    let webError: string | undefined;
 
     /**
      * Fetch fresh evidence when the novel corpus runs dry.
@@ -677,7 +679,23 @@ export async function POST(req: Request) {
             startPublishedDate: new Date(
               Date.now() - 14 * 24 * 3600 * 1000,
             ).toISOString(),
-          }).catch(() => [] as WebSource[])
+          }).catch((err) => {
+            /**
+             * A failed search is not an empty one.
+             *
+             * Swallowing this to [] made an Exa outage, a rate limit or a bad
+             * key render exactly like "there is no reporting on this" — and the
+             * model, handed nothing, then writes a card saying the evidence
+             * doesn't exist. That is a silent failure wearing the costume of a
+             * finding, which is the one failure mode this board is not allowed
+             * to have. We still don't fail the expand over it: the posts are
+             * real evidence on their own. We just refuse to let the absence
+             * pass as a result.
+             */
+            webError = err instanceof Error ? err.message : "web search failed";
+            console.error("[expand] web search FAILED (not empty):", err);
+            return [] as WebSource[];
+          })
         : Promise.resolve([] as WebSource[]);
 
     if (wantsFresh && !XSEARCH_FORKS.has(fork)) {
@@ -843,6 +861,10 @@ export async function POST(req: Request) {
       // distinguish posts we just fetched from X for this node from ones that
       // were already in the board's corpus
       source: useXSearch ? "x_search" : groundedNow ? "x_grounded" : "timeline",
+      // the expand succeeded on posts alone, but the reporting half of the
+      // evidence is missing and the card must not imply we looked and found
+      // nothing
+      webError,
     });
   } catch (err) {
     console.error("[expand]", err);
